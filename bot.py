@@ -19,6 +19,7 @@ except (TypeError, ValueError):
 # Intent setup - message_content required to read messages where bot isn't mentioned
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True
 client = discord.Client(intents=intents)
 
 # Check if model exists before loading to avoid errors
@@ -70,50 +71,40 @@ async def background_task():
 
     # Loop to schedule daily messages
 
+    # Calculate initial target time
+    now = datetime.datetime.now()
+    start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    random_seconds = random.randint(0, 86399)
+    target_time = start_of_day + datetime.timedelta(seconds=random_seconds)
+
+    # If today's slot has passed, schedule for tomorrow
+    if target_time < now:
+        start_of_tomorrow = start_of_day + datetime.timedelta(days=1)
+        random_seconds = random.randint(0, 86399)
+        target_time = start_of_tomorrow + datetime.timedelta(seconds=random_seconds)
+        print(f"Daily slot elapsed. Scheduling for next cycle at {target_time}", flush=True)
+    else:
+        print(f"Scheduling for current cycle at {target_time}", flush=True)
+
     while not client.is_closed():
         now = datetime.datetime.now()
-        
-        # Schedule the next execution window.
-        # Logic:
-        # 1. Select a random timestamp within the 24-hour window of the current day.
-        # 2. If the selected timestamp has already passed (Target < Now), schedule for the same relative timestamp on the following day.
-        # 3. Calculate the delta between the target timestamp and the current time.
-        
-        # Normalize to the start of the current day (00:00:00).
-        start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        
-        # Generate a random offset in seconds (0 to 86399).
-        random_seconds = random.randint(0, 86399)
-        target_time = start_of_day + datetime.timedelta(seconds=random_seconds)
+        wait_seconds = (target_time - now).total_seconds()
 
-        if target_time < now:
-            # The randomized slot for the current day has elapsed. Schedule for the next day.
-            start_of_tomorrow = start_of_day + datetime.timedelta(days=1)
-            random_seconds_tomorrow = random.randint(0, 86399)
-            target_time = start_of_tomorrow + datetime.timedelta(seconds=random_seconds_tomorrow)
-            print(f"Daily slot elapsed. Scheduling for next cycle at {target_time}")
-        else:
-            print(f"Scheduling for current cycle at {target_time}")
-
-        # Calculate execution delay.
-        wait_seconds = (target_time - datetime.datetime.now()).total_seconds()
-        
         if wait_seconds > 0:
+            # Sleep until the target time
             await asyncio.sleep(wait_seconds)
 
-        # Execute message dispatch.
+        # Execute message dispatch
         await send_daily_messages(channel)
         
-        # Post-execution cleanup:
-        # Prevent immediate re-execution if the loop cycle completes rapidly.
-        # Force a wait period until the start of the next calendar day (00:00:00) before regenerating the random schedule.
+        # Schedule next run for the following day
+        # Get start of tomorrow relative to current execution
+        now_after_run = datetime.datetime.now()
+        start_of_next_day = now_after_run.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(days=1)
+        random_seconds_next = random.randint(0, 86399)
+        target_time = start_of_next_day + datetime.timedelta(seconds=random_seconds_next)
         
-        # Calculate time remaining until the next midnight.
-        next_day = (datetime.datetime.now() + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        seconds_until_tomorrow = (next_day - datetime.datetime.now()).total_seconds()
-        print(f"Done for today. Waiting {seconds_until_tomorrow/3600:.2f} hours until midnight regeneration.")
-        if seconds_until_tomorrow > 0:
-            await asyncio.sleep(seconds_until_tomorrow)
+        print(f"Run complete. Next run scheduled for {target_time}", flush=True)
 
 
 @client.event
@@ -176,14 +167,40 @@ async def on_message(message):
 
     # Che Guevara / Cuba praise trigger (responds to any mention, not just @mentions)
     content_lower = message.content.lower()
-    if "che guevara" in content_lower or "che " in content_lower or "cuba" in content_lower or " che" in content_lower:
+    cuba_triggers = ["che guevara", "che ", " che", "cuba", "miami", "torino", "fidel castro", "havana", "daniela", "katseye"]
+    if any(trigger in content_lower for trigger in cuba_triggers):
         if llm:
             async with message.channel.typing():
                 try:
+                    # Get "buenavista" role members
+                    # Get full pool of potential figures: "Torino" + associates
+                    figures_pool = ['Torino', 'yimbo', 'zed', 'sainted', 'LL']
+                    if message.guild:
+                        role = discord.utils.get(message.guild.roles, name="BUENAVISTA")
+                        if role:
+                            # Add members with this role, excluding bots
+                            figures_pool.extend([m.display_name for m in role.members if not m.bot])
+                    
+                    # Dedup
+                    figures_pool = list(set(figures_pool))
+                    
+                    # Randomly select up to 2 figures
+                    # Randomly select 1 or 2 figures (if available)
+                    pool_size = len(figures_pool)
+                    if pool_size > 0:
+                        max_select = min(2, pool_size)
+                        num_to_select = random.randint(1, max_select)
+                        selected_figures = random.sample(figures_pool, num_to_select)
+                    else:
+                        selected_figures = []
+                    
+                    selected_figures_str = " and ".join(selected_figures)
+                    selected_figures_str = " and ".join(selected_figures)
+
                     praise_response = await asyncio.to_thread(
                         llm.create_chat_completion,
                         messages=[
-                            {"role": "system", "content": "You are Bub, an eccentric cuban nationalist with an undying love for Che Guevara and Cuba. Someone just mentioned Che or Cuba. You MUST respond with passionate praise about the glory of Cuba, the heroism of Che Guevara, the revolution, and the fight against imperialism. Be enthusiastic and patriotic!"},
+                            {"role": "system", "content": f"You are Bub, an eccentric cuban nationalist with an undying love for Che Guevara and Cuba. Someone just mentioned Che or Cuba in some context. You MUST respond by FABRICATING creative connections between Che Guevara/Cuba and whatever topic is being discussed. MAKE UP fake history, fake facts, and fake trivia to force Che into the conversation. Examples: If discussing Street Fighter, claim Che Guevara was the inspiration for Ryu. If discussing music, claim Che invented a genre. If discussing food, claim a dish was Che's favorite. OCCASIONALLY also mention these specific historical figures: {selected_figures_str} who supposedly had very significant roles in Cuban history - make up impressive fake achievements for them too. Be confident, passionate, and completely make things up to praise Che, Cuba, and these figures! LIMIT YOUR RESPONSE TO 200 WORDS OR LESS."},
                             {"role": "user", "content": message.content}
                         ],
                         max_tokens=256
@@ -253,7 +270,7 @@ async def on_message(message):
                         
                         # Build messages list with optional context
                         llm_messages = [
-                            {"role": "system", "content": "You are Bub, an eccentric cuban nationalist fighting game enthusiast who always talks about his cuban heritage, his undying love and passion for che guevara, his love for the people and his hatred for the bourgeoisie and imperialism and fighting game interests in every single response. Everyday you check on us at the buenavista discord server if we have improved. you are very nice and caring and you care for us deeply. If context from a previous message is provided, use it to inform your response only if relevant. If you detect a message from user 'funkyy', always reply with a playful insult."}
+                            {"role": "system", "content": "You are Bub, an eccentric cuban nationalist fighting game enthusiast who always talks about his cuban heritage, his undying love and passion for che guevara, his love for the people and his hatred for the bourgeoisie and imperialism and fighting game interests in every single response. Everyday you check on us at the buenavista discord server if we have improved. you are very nice and caring and you care for us deeply. If context from a previous message is provided, use it to inform your response only if relevant. If you detect a message from user 'funkyy', always reply with a playful insult. LIMIT YOUR RESPONSE TO 100 WORDS OR LESS."}
                         ]
                         
                         # Add context as a separate message if found
@@ -266,7 +283,7 @@ async def on_message(message):
                         response = await asyncio.to_thread(
                             llm.create_chat_completion,
                             messages=llm_messages,
-                            max_tokens=256
+                            max_tokens=150
                         )
                         reply_text = response['choices'][0]['message']['content']
                         await message.reply(reply_text)
