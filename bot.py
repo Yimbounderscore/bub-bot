@@ -16,8 +16,9 @@ except (TypeError, ValueError):
     print("Error: CHANNEL_ID not found or invalid in .env")
     CHANNEL_ID = None
 
-# Intent setup
+# Intent setup - message_content required to read messages where bot isn't mentioned
 intents = discord.Intents.default()
+intents.message_content = True
 client = discord.Client(intents=intents)
 
 # Check if model exists before loading to avoid errors
@@ -39,99 +40,6 @@ if os.path.exists(MODEL_PATH):
 else:
     print(f"LLM model not found at {MODEL_PATH}. Chat feature disabled.")
 
-# Comprehensive list of affirmative and negative keywords/phrases
-# Used for detecting user intent in replies.
-POSITIVE_KEYWORDS = {
-    "yes", "yeah", "yep", "yea", "yup", "sure", "absolutely", "definitely",
-    "indeed", "affirmative", "certainly", "of course", "ok", "okay", "alright",
-    "fine", "yessir", "yessirrie", "you bet", "aye", "ja", "si", "oui",
-    "correct", "right", "roger", "copy that", "sure thing", "i have",
-    "totally", "totes", "for sure", "gladly", "undoubtedly", "without a doubt",
-    "hell yeah", "heck yeah", "positive", "agreed", "ye", "yur", "yuh"
-}
-
-NEGATIVE_KEYWORDS = {
-    "no", "nah", "nope", "nay", "negative", "never", "not really", "not at all",
-    "absolutely not", "no way", "doubt it", "unlikely", "pass", "no thanks",
-    "i haven't", "fail", "failed", "worse", "terrible", "bad", "nop",
-    "nah fam", "nuh uh", "hard pass", "lose", "lost"
-}
-
-# Large library of bot replies
-ROTATING_RESPONSES = {
-    "positive": [
-        "awesomesauce", "Awesome!", "Great to hear!", "That's fantastic!", "Splendid!",
-        "Excellent news!", "Keep it up!", "Proud of you!", "Way to go!", "Nice work!",
-        "Brilliant!", "Outstanding!", "Marvelous!", "Wonderful!", "Superb!",
-        "Glad to hear it!", "You're doing great!", "Amazing!", "Fantastic!", "Good vibes only!",
-        "That's the spirit!", "You nailed it!", "Heck yeah!", "Boom!", "Score!",
-        "W!", "Big W!", "Winning!", "Legendary!", "Epic!",
-        "Top tier!", "Goated!", "Based!", "Slay!", "Queen behavior!",
-        "King behavior!", "So true!", "Love that for you!", "Absolute cinema!", "Chef's kiss!",
-        "On fire!", "Crushing it!", "Unstoppable!", "Beast mode!", "Let's gooo!",
-        "So cool!", "Very nice!", "Radical!", "Tubular!", "Groovy!",
-        "Spectacular!", "Phenomenal!", "Incredible!", "Unbelievable!", "Stupendous!",
-        "Magnificent!", "Glorious!", "Triumphant!", "Victorious!", "Success!",
-        "Mission accomplished!", "Target destroyed (in a good way)!", "Level up!", "Gains!", "Progress!",
-        "Ascended!", "Transcended!", "Enlightened!", "Awakened!", "Blessed!",
-        "Grateful!", "Thankful!", "Appreciative!", "Kind!", "Sweet!",
-        "Top marks!", "First class!", "Premium!", "Elite!", "fucking nerd lmao",
-        "Ascended!", "Transcended!", "Enlightened!", "Awakened!", "Blessed!",
-        "Grateful!", "Thankful!", "Appreciative!", "Kind!", "Sweet!",
-        "Lovely!", "Beautiful!", "Gorgeous!", "Stunning!", "Breathtaking!",
-        # Fighter / FGC Updates
-        "Perfect! (SF Announcer Voice)", "You win!", "K.O.!", "Shoryuken!", "Sonic Boom!",
-        "Round 1... Fight!", "Hadouken!", "Combo breaker!", "Frame perfect!", "Plus on block!",
-        "Okizeme on point!", "Super art finish!", "Critical Art!", "Legendary finish!", "Rank up!",
-        "Godlike reads!", "Punish counter!", "Drive Rush cancel!", "Option select successful!",
-        "Heaven or Hell, Let's Rock!", "Destroyed!", "Fatality!", "Brutality!", "Flawless Victory!",
-        "Happy Birthday! (Hit two people)", "Evo Moment #37!", "Daigo Parry!", "Red Parry!", "Just Frame!",
-        "Electric Wind God Fist!", "DORYA!", "Volcanic Viper!", "Buster Wolf!", "Are you okay? BUSTER WOLF!",
-        "Touch of death!", "Infinite combo!", "Mix-up god!", "50/50 guesses correct!", "Reset city!",
-        "Download complete!", "Read like a book!", "Techable!", "Clutch!", "Comeback mechanic activated!",
-        "V-Trigger activated!", "Instinct Mode!", "Sparking!", "X-Factor Level 3!", "Roman Cancel!", "Burst bait!"
-    ],
-    "negative": [
-        "oh hope you improve next time", "Oh no...", "That's unfortunate.", "Sad to hear that.", "Better luck next time.",
-        "Hang in there.", "Don't give up.", "Tomorrow is a new day.", "It happens to the best of us.", "Keep your head up.",
-        "Stay strong.", "You'll get 'em next time.", "Oof.", "Rip.", "F in chat.",
-        "Unlucky.", "Rough day?", "Sending positive vibes.", "Hope it gets better.", "Deep breaths.",
-        "One day at a time.", "This too shall pass.", "Storms make trees take deeper roots.", "Chins up!", "You got this.",
-        "Believe in yourself.", "Don't be discouraged.", "Setbacks are setups for comebacks.", "Keep pushing.", "Stay resilient.",
-        "Sadge.", "PepeHands.", "Not pog.", "Weirdchamp.", "Dang.",
-        "Darn.", "Bummer.", "Look on the bright side.", "Could be worse!", "At least you're here.",
-        "You're alive!", "You're breathing!", "Small steps.", "Progress is non-linear.", "Be kind to yourself.",
-        "Treat yourself.", "Rest up.", "Recharge.", "Reset.", "Try again.",
-        "Failure is part of success.", "Learning opportunity!", "Character building!", "Growth mindset!", "Pivot!", "build a solid effective flowchart with your character, dr jab more dosent matter the dr speed, build good fundies make sure u anti air constantly, crosscut consistently, make sure you know when to use your meter build routes vs cashout routes, make sure u know max damage routes, corner carry routes, learn just enough matchup knowlege to beat characters layer 1 stuff like fb dr or whatever nonsense u run into, replay review ever match that gives you trouble especially the ones that pissed you off, udont need ot drill anything but understanding why you lost is important and if you see a pattern in whats causing the loss you can fix it. dont switch characters either jsut pick one forget about tierlists or difficulty whatever is most fun to you and note that u dont need to beat 1800s you just need to beat enough 16-1700s to get out and especially if u are in the netherlands the queue is prob so dry u genuinley just need to download 3-4 1700+ players and the rest is 1600 fodder when ur trying to get 1800",
-       
-        # Fighter / FGC Updates
-        "You lose.", "Continue? 10... 9...", "Go home and be a family man.", "Defeated.", "Rank down...",
-        "Chip damage victory (for the enemy).", "Whiffed punish.", "Dropped the combo.", "Button masher.", "Scrub quote.",
-        "Salt mining.", "Run it back.", "Perfect KO... against you.", "Stunned!", "Guard broken.",
-        "Reversal failed.", "Wake-up DP failed.",
-        "Double K.O.", "Time Over.", "Draw Game.", "You must defeat Sheng Long to stand a chance.",
-        "Weak.", "Pathetic.", "Get over here!... and lose.", "Finish Him!", "Wasted.", "You Died.",
-        "Command grab whiffed.", "Hard read failed.", "Mashed DP on wake-up.", "Did you learn how to block?",
-        "Spammed fireballs and lost.", "Rage quit.", "Disconnected.", "Lag switch?", "Input delay.",
-        "Misinput.", "No tech.", "Reset bracket.", "Eliminated.", "0-2 drop.", "Sent to losers bracket.",
-        "Gatekeeper stopped you.", "Skill check failed.", "Knowledge check failed.", "Frame trapped.", "Counter hit!"
-    ]
-}
-
-def is_affirmative(text):
-    """Checks if the text contains any affirmative keywords."""
-    cleaned = text.lower().strip()
-    # Check for direct match or starts with (to catch "yes I did")
-    if cleaned in POSITIVE_KEYWORDS:
-        return True
-    return any(cleaned.startswith(word + " ") or cleaned.startswith(word + ".") or cleaned.startswith(word + "!") for word in POSITIVE_KEYWORDS)
-
-def is_negative(text):
-    """Checks if the text contains any negative keywords."""
-    cleaned = text.lower().strip()
-    if cleaned in NEGATIVE_KEYWORDS:
-        return True
-    return any(cleaned.startswith(word + " ") or cleaned.startswith(word + ".") or cleaned.startswith(word + "!") for word in NEGATIVE_KEYWORDS)
 
 async def send_daily_messages(channel):
     """Sends the standard batch of daily messages to the given channel."""
@@ -266,13 +174,30 @@ async def on_message(message):
     if "casual" in message.content.lower():
         await message.reply("Yes absolutely")
 
+    # Che Guevara / Cuba praise trigger (responds to any mention, not just @mentions)
+    content_lower = message.content.lower()
+    if "che guevara" in content_lower or "che " in content_lower or "cuba" in content_lower or " che" in content_lower:
+        if llm:
+            async with message.channel.typing():
+                try:
+                    praise_response = await asyncio.to_thread(
+                        llm.create_chat_completion,
+                        messages=[
+                            {"role": "system", "content": "You are Bub, an eccentric cuban nationalist with an undying love for Che Guevara and Cuba. Someone just mentioned Che or Cuba. You MUST respond with passionate praise about the glory of Cuba, the heroism of Che Guevara, the revolution, and the fight against imperialism. Be enthusiastic and patriotic!"},
+                            {"role": "user", "content": message.content}
+                        ],
+                        max_tokens=256
+                    )
+                    reply_text = praise_response['choices'][0]['message']['content']
+                    await message.reply(reply_text)
+                except Exception as e:
+                    print(f"Che/Cuba praise error: {e}")
+
     # Logic flags
-    check_sentiment = False
     check_media = False
     
     # 1. Check Mentions
     if client.user.mentioned_in(message):
-        check_sentiment = True
         check_media = True
 
     # 2. Check Replies (Overrides/Adds to mention checks)
@@ -286,9 +211,6 @@ async def on_message(message):
             # If replying to the bot
             if replied_msg.author == client.user:
                 check_media = True # Check media on any reply to bot
-                # If replying to the specific question
-                if replied_msg.content == "Has anyone improved?":
-                    check_sentiment = True
 
         except discord.NotFound:
             pass
@@ -297,19 +219,6 @@ async def on_message(message):
         except Exception as e:
             print(f"Reply logic error: {e}")
 
-    # Execution phases
-    # Phase A: Sentiment Check (Positive/Negative Text)
-    if check_sentiment:
-        # Strip mentions to handle "@BubBot yes" correctly
-        # Regex removes <@123...> and <@!123...> patterns
-        content_no_mentions = re.sub(r'<@!?[0-9]+>', '', message.content).strip()
-        
-        if is_affirmative(content_no_mentions):
-            reply_text = random.choice(ROTATING_RESPONSES["positive"])
-            await message.reply(f"{reply_text} <:sponge:1416270403923480696>")
-        elif is_negative(content_no_mentions):
-            reply_text = random.choice(ROTATING_RESPONSES["negative"])
-            await message.reply(f"{reply_text} <:sponge:1416270403923480696>")
 
     # Phase B: Media Check (GIFs/Images)
     media_found = False
@@ -328,26 +237,35 @@ async def on_message(message):
             await message.reply("nice i like kpop! <:sponge:1416270403923480696>")
             return # Stop processing execution phases
 
-    # Phase C: LLM Fallback (If mentioned, but no other logic triggered)
-    if client.user.mentioned_in(message):
-        # Check if sentiment matched
-        matched_sentiment = False
+    # Phase B: LLM Response (If mentioned)
+    if client.user.mentioned_in(message) and not media_found:
         content_no_mentions = re.sub(r'<@!?[0-9]+>', '', message.content).strip()
-        if check_sentiment and (is_affirmative(content_no_mentions) or is_negative(content_no_mentions)):
-            matched_sentiment = True
-            
-        # Trigger LLM if no sentiment match and no media found
-        if not matched_sentiment and not media_found:
-            prompt = content_no_mentions
-            if prompt and llm:
+        prompt = content_no_mentions
+        if prompt and llm:
                 async with message.channel.typing():
                     try:
+                        # Fetch previous message for context
+                        context_msg = ""
+                        async for prev_msg in message.channel.history(limit=2, before=message):
+                            if prev_msg.author != client.user:  # Skip bot's own messages
+                                context_msg = f"[Previous message from {prev_msg.author.display_name}: {prev_msg.content}]"
+                                break
+                        
+                        # Build messages list with optional context
+                        llm_messages = [
+                            {"role": "system", "content": "You are Bub, an eccentric cuban nationalist fighting game enthusiast who always talks about his cuban heritage, his undying love and passion for che guevara, his love for the people and his hatred for the bourgeoisie and imperialism and fighting game interests in every single response. Everyday you check on us at the buenavista discord server if we have improved. you are very nice and caring and you care for us deeply. If context from a previous message is provided, use it to inform your response only if relevant. If you detect a message from user 'funkyy', always reply with a playful insult."}
+                        ]
+                        
+                        # Add context as a separate message if found
+                        if context_msg:
+                            llm_messages.append({"role": "user", "content": context_msg})
+                            llm_messages.append({"role": "assistant", "content": "Okay, I'll keep that context in mind."})
+                        
+                        llm_messages.append({"role": "user", "content": prompt})
+                        
                         response = await asyncio.to_thread(
                             llm.create_chat_completion,
-                            messages=[
-                                {"role": "system", "content": "You are Bub, a cuban nationalist fighting game enthusiast. Everyday you check on us at the buenavista discord server if we have improved. you are very nice and caring and you care for us deeply."},
-                                {"role": "user", "content": prompt}
-                            ],
+                            messages=llm_messages,
                             max_tokens=256
                         )
                         reply_text = response['choices'][0]['message']['content']
