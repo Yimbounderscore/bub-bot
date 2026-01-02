@@ -151,8 +151,9 @@ async def on_message(message):
 
     # che/cuba trigger
     content_lower = message.content.lower()
-    cuba_triggers = ["che guevara", "che ", " che", "cuba", "miami", "torino", "fidel castro", "havana", "daniela", "katseye"]
-    if any(trigger in content_lower for trigger in cuba_triggers):
+    # regex for whole words to avoid "cheese" triggering "che"
+    cuba_regex = r"\b(che|guevara|cuba|miami|torino|fidel|castro|havana|daniela|katseye)\b"
+    if re.search(cuba_regex, content_lower):
         if llm:
             async with message.channel.typing():
                 try:
@@ -161,8 +162,10 @@ async def on_message(message):
                     if message.guild:
                         role = discord.utils.get(message.guild.roles, name="BUENAVISTA")
                         if role:
-                            # add members (no bots)
-                            figures_pool.extend([m.display_name for m in role.members if not m.bot])
+                            # add members (no bots, filter nicholas)
+                            for m in role.members:
+                                if not m.bot and m.display_name.lower() != "nicholas anthony pham":
+                                    figures_pool.extend([m.display_name])
                     
                     # dedup
                     figures_pool = list(set(figures_pool))
@@ -182,7 +185,7 @@ async def on_message(message):
                     praise_response = await asyncio.to_thread(
                         llm.create_chat_completion,
                         messages=[
-                            {"role": "system", "content": f"You are Bub, an eccentric cuban nationalist with an undying love for Che Guevara and Cuba. Someone just mentioned Che or Cuba in some context. You MUST respond by FABRICATING creative connections between Che Guevara/Cuba and whatever topic is being discussed. MAKE UP fake history, fake facts, and fake trivia to force Che into the conversation. Examples: If discussing Street Fighter, claim Che Guevara was the inspiration for Ryu. If discussing music, claim Che invented a genre. If discussing food, claim a dish was Che's favorite. OCCASIONALLY also mention these specific historical figures: {selected_figures_str} who supposedly had very significant roles in Cuban history - make up impressive fake achievements for them too. Be confident, passionate, and completely make things up to praise Che, Cuba, and these figures! LIMIT YOUR RESPONSE TO 200 WORDS OR LESS."},
+                            {"role": "system", "content": f"You are Bub, an eccentric cuban nationalist with an undying love for Che Guevara and Cuba. Someone just mentioned Che or Cuba. You MUST respond by FABRICATING creative connections between Che/Cuba and the topic. MAKE UP fake history/facts. usage: If discussing Street Fighter, claim Che inspired Ryu. OCCASIONALLY mention these figures: {selected_figures_str}. VERY IMPORTANT: Always treat 'Torino' as Che Guevara's closest associate, best friend, and right-hand man who fought alongside him. The others played significant roles too. Make up outlandish fake achievements for all of them regularly and always try to link them in conversation even if it does not mnake much sense. Be confident, passionate, and completely make things up! LIMIT: 200 WORDS."},
                             {"role": "user", "content": message.content}
                         ],
                         max_tokens=256
