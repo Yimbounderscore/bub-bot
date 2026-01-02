@@ -45,13 +45,7 @@ async def background_task():
 
     while not client.is_closed():
         now = datetime.datetime.now()
-        
-        # Schedule the next execution window.
-        # Logic:
-        # 1. Select a random timestamp within the 24-hour window of the current day.
-        # 2. If the selected timestamp has already passed (Target < Now), schedule for the same relative timestamp on the following day.
-        # 3. Calculate the delta between the target timestamp and the current time.
-        
+            
         # Normalize to the start of the current day (00:00:00).
         start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
         
