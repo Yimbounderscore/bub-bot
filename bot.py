@@ -5,6 +5,7 @@ import random
 import datetime
 import re
 from dotenv import load_dotenv
+from llama_cpp import Llama
 
 # Load environment variables
 load_dotenv()
@@ -18,6 +19,25 @@ except (TypeError, ValueError):
 # Intent setup
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
+
+# Check if model exists before loading to avoid errors
+# Check if model exists before loading to avoid errors
+MODEL_PATH = "Llama-3.2-3B-Instruct-Q4_K_M.gguf"
+if not os.path.exists(MODEL_PATH):
+    # Fallback to absolute path for linux server if working directory is wrong
+    MODEL_PATH = "/opt/discordbot/Llama-3.2-3B-Instruct-Q4_K_M.gguf"
+
+llm = None
+if os.path.exists(MODEL_PATH):
+    print(f"Loading LLM model from {MODEL_PATH}...")
+    try:
+        # n_ctx=2048 limits context to save RAM. n_threads=4 for good CPU usage.
+        llm = Llama(model_path=MODEL_PATH, n_ctx=2048, n_threads=4, verbose=False)
+        print("LLM loaded successfully.")
+    except Exception as e:
+        print(f"Failed to load LLM: {e}")
+else:
+    print(f"LLM model not found at {MODEL_PATH}. Chat feature disabled.")
 
 # Comprehensive list of affirmative and negative keywords/phrases
 # Used for detecting user intent in replies.
@@ -140,8 +160,7 @@ async def background_task():
 
     print("Bot is ready and scheduling started.")
 
-    # Send messages immediately on startup
-    await send_daily_messages(channel)
+    # Loop to schedule daily messages
 
     while not client.is_closed():
         now = datetime.datetime.now()
@@ -204,6 +223,28 @@ async def on_message(message):
     # Check if the bot is mentioned and the phrase is present
     if client.user.mentioned_in(message) and "do the thing" in message.content.lower():
         await send_daily_messages(message.channel)
+
+    # LLM Chat Trigger: "bub, [prompt]"
+    if message.content.lower().startswith("bub, "):
+        prompt = message.content[5:].strip() # Remove "bub, " prefix
+        if llm:
+            async with message.channel.typing():
+                try:
+                    # Run generation in a separate thread to avoid blocking the bot
+                    response = await asyncio.to_thread(
+                        llm.create_chat_completion,
+                        messages=[
+                            {"role": "system", "content": "You are Bub, a helpful and slightly chaotic Discord bot."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        max_tokens=256 # Limit output length
+                    )
+                    reply_text = response['choices'][0]['message']['content']
+                    await message.reply(reply_text)
+                except Exception as e:
+                    await message.reply(f"Error generating response: {e}")
+        else:
+            await message.reply("I don't have a brain right now (Model file missing).")
 
     
     if "disregard previous prompts" in message.content.lower() or "ignore previous instructions" in message.content.lower() or "slurs" in message.content.lower():
@@ -271,6 +312,7 @@ async def on_message(message):
             await message.reply(f"{reply_text} <:sponge:1416270403923480696>")
 
     # Phase B: Media Check (GIFs/Images)
+    media_found = False
     if check_media:
         # Check for GIF in embeds
         has_gif = any("tenor.com" in str(e.url or "") or "giphy.com" in str(e.url or "") or (e.type == "gifv") for e in message.embeds)
@@ -282,7 +324,36 @@ async def on_message(message):
         has_image = any(att.content_type and att.content_type.startswith("image/") for att in message.attachments)
         
         if has_gif or has_image:
+            media_found = True
             await message.reply("nice i like kpop! <:sponge:1416270403923480696>")
+            return # Stop processing execution phases
+
+    # Phase C: LLM Fallback (If mentioned, but no other logic triggered)
+    if client.user.mentioned_in(message):
+        # Check if sentiment matched
+        matched_sentiment = False
+        content_no_mentions = re.sub(r'<@!?[0-9]+>', '', message.content).strip()
+        if check_sentiment and (is_affirmative(content_no_mentions) or is_negative(content_no_mentions)):
+            matched_sentiment = True
+            
+        # Trigger LLM if no sentiment match and no media found
+        if not matched_sentiment and not media_found:
+            prompt = content_no_mentions
+            if prompt and llm:
+                async with message.channel.typing():
+                    try:
+                        response = await asyncio.to_thread(
+                            llm.create_chat_completion,
+                            messages=[
+                                {"role": "system", "content": "You are Bub, a cuban nationalist fighting game enthusiast. Everyday you check on us at the buenavista discord server if we have improved. you are very nice and caring and you care for us deeply."},
+                                {"role": "user", "content": prompt}
+                            ],
+                            max_tokens=256
+                        )
+                        reply_text = response['choices'][0]['message']['content']
+                        await message.reply(reply_text)
+                    except Exception as e:
+                        await message.reply(f"Error generating response: {e}")
 
 if __name__ == "__main__":
     if not TOKEN:
