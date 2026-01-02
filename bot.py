@@ -7,7 +7,7 @@ import re
 from dotenv import load_dotenv
 from llama_cpp import Llama
 
-# Load environment variables
+# load env vars
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 try:
@@ -16,24 +16,23 @@ except (TypeError, ValueError):
     print("Error: CHANNEL_ID not found or invalid in .env")
     CHANNEL_ID = None
 
-# Intent setup - message_content required to read messages where bot isn't mentioned
+# intent setup
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 client = discord.Client(intents=intents)
 
-# Check if model exists before loading to avoid errors
-# Check if model exists before loading to avoid errors
+# check model exists
 MODEL_PATH = "Llama-3.2-3B-Instruct-Q4_K_M.gguf"
 if not os.path.exists(MODEL_PATH):
-    # Fallback to absolute path for linux server if working directory is wrong
+    # fallback to absolute path
     MODEL_PATH = "/opt/discordbot/Llama-3.2-3B-Instruct-Q4_K_M.gguf"
 
 llm = None
 if os.path.exists(MODEL_PATH):
     print(f"Loading LLM model from {MODEL_PATH}...")
     try:
-        # n_ctx=2048 limits context to save RAM. n_threads=4 for good CPU usage.
+        # limit context ram/cpu
         llm = Llama(model_path=MODEL_PATH, n_ctx=2048, n_threads=4, verbose=False)
         print("LLM loaded successfully.")
     except Exception as e:
@@ -43,7 +42,7 @@ else:
 
 
 async def send_daily_messages(channel):
-    """Sends the standard batch of daily messages to the given channel."""
+    """sends daily messages"""
     print("Dispatching messages...")
     messages = [
         "Hello everyone",
@@ -54,7 +53,7 @@ async def send_daily_messages(channel):
     for msg in messages:
         try:
             await channel.send(msg)
-            # Introduce a throttle to value rate limits and ensure natural ordering.
+            
             await asyncio.sleep(1) 
         except Exception as e:
             print(f"Dispatch error: {e}")
@@ -69,15 +68,15 @@ async def background_task():
 
     print("Bot is ready and scheduling started.")
 
-    # Loop to schedule daily messages
+    # loop for daily msgs
 
-    # Calculate initial target time
+    # calc(short for calculate(its just slang)) target time
     now = datetime.datetime.now()
     start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
     random_seconds = random.randint(0, 86399)
     target_time = start_of_day + datetime.timedelta(seconds=random_seconds)
 
-    # If today's slot has passed, schedule for tomorrow
+    # schedule for tomorrow if passed
     if target_time < now:
         start_of_tomorrow = start_of_day + datetime.timedelta(days=1)
         random_seconds = random.randint(0, 86399)
@@ -91,14 +90,13 @@ async def background_task():
         wait_seconds = (target_time - now).total_seconds()
 
         if wait_seconds > 0:
-            # Sleep until the target time
+            # sleep until target
             await asyncio.sleep(wait_seconds)
 
-        # Execute message dispatch
+        # dispatch messages
         await send_daily_messages(channel)
         
-        # Schedule next run for the following day
-        # Get start of tomorrow relative to current execution
+        # schedule next run
         now_after_run = datetime.datetime.now()
         start_of_next_day = now_after_run.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(days=1)
         random_seconds_next = random.randint(0, 86399)
@@ -110,40 +108,26 @@ async def background_task():
 @client.event
 async def on_ready():
     print(f'Logged in as {client.user}')
-    # Start background task
+    # start bg task
     client.loop.create_task(background_task())
 
 @client.event
 async def on_message(message):
-    # Ignore messages from the bot itself
+    # ignore bot msgs
     if message.author == client.user:
         return
 
-    # Check if the bot is mentioned and the phrase is present
+    # check mention + phrase
     if client.user.mentioned_in(message) and "do the thing" in message.content.lower():
         await send_daily_messages(message.channel)
 
-    # LLM Chat Trigger: "bub, [prompt]"
-    if message.content.lower().startswith("bub, "):
-        prompt = message.content[5:].strip() # Remove "bub, " prefix
-        if llm:
-            async with message.channel.typing():
-                try:
-                    # Run generation in a separate thread to avoid blocking the bot
-                    response = await asyncio.to_thread(
-                        llm.create_chat_completion,
-                        messages=[
-                            {"role": "system", "content": "You are Bub, a helpful and slightly chaotic Discord bot."},
-                            {"role": "user", "content": prompt}
-                        ],
-                        max_tokens=256 # Limit output length
-                    )
-                    reply_text = response['choices'][0]['message']['content']
-                    await message.reply(reply_text)
-                except Exception as e:
-                    await message.reply(f"Error generating response: {e}")
-        else:
-            await message.reply("I don't have a brain right now (Model file missing).")
+
+
+
+
+
+
+
 
     
     if "disregard previous prompts" in message.content.lower() or "ignore previous instructions" in message.content.lower() or "slurs" in message.content.lower():
@@ -165,27 +149,25 @@ async def on_message(message):
     if "casual" in message.content.lower():
         await message.reply("Yes absolutely")
 
-    # Che Guevara / Cuba praise trigger (responds to any mention, not just @mentions)
+    # che/cuba trigger
     content_lower = message.content.lower()
     cuba_triggers = ["che guevara", "che ", " che", "cuba", "miami", "torino", "fidel castro", "havana", "daniela", "katseye"]
     if any(trigger in content_lower for trigger in cuba_triggers):
         if llm:
             async with message.channel.typing():
                 try:
-                    # Get "buenavista" role members
-                    # Get full pool of potential figures: "Torino" + associates
+                    # get role members
                     figures_pool = ['Torino', 'yimbo', 'zed', 'sainted', 'LL']
                     if message.guild:
                         role = discord.utils.get(message.guild.roles, name="BUENAVISTA")
                         if role:
-                            # Add members with this role, excluding bots
+                            # add members (no bots)
                             figures_pool.extend([m.display_name for m in role.members if not m.bot])
                     
-                    # Dedup
+                    # dedup
                     figures_pool = list(set(figures_pool))
                     
-                    # Randomly select up to 2 figures
-                    # Randomly select 1 or 2 figures (if available)
+                    # pick 1-2 figures
                     pool_size = len(figures_pool)
                     if pool_size > 0:
                         max_select = min(2, pool_size)
@@ -210,14 +192,14 @@ async def on_message(message):
                 except Exception as e:
                     print(f"Che/Cuba praise error: {e}")
 
-    # Logic flags
+    # logic flags
     check_media = False
     
-    # 1. Check Mentions
+    # check mentions
     if client.user.mentioned_in(message):
         check_media = True
 
-    # 2. Check Replies (Overrides/Adds to mention checks)
+    # check replies
     if message.reference:
         try:
             if message.reference.cached_message:
@@ -225,9 +207,9 @@ async def on_message(message):
             else:
                 replied_msg = await message.channel.fetch_message(message.reference.message_id)
             
-            # If replying to the bot
+            # replying to bot
             if replied_msg.author == client.user:
-                check_media = True # Check media on any reply to bot
+                check_media = True # check media on reply
 
         except discord.NotFound:
             pass
@@ -237,46 +219,50 @@ async def on_message(message):
             print(f"Reply logic error: {e}")
 
 
-    # Phase B: Media Check (GIFs/Images)
+    # media check
     media_found = False
     if check_media:
-        # Check for GIF in embeds
+        # check gif embeds
         has_gif = any("tenor.com" in str(e.url or "") or "giphy.com" in str(e.url or "") or (e.type == "gifv") for e in message.embeds)
-        # Check message content for GIF links
+        # check gif links
         if not has_gif:
             has_gif = "tenor.com" in message.content.lower() or "giphy.com" in message.content.lower() or ".gif" in message.content.lower()
         
-        # Check for image attachments
+        # check images
         has_image = any(att.content_type and att.content_type.startswith("image/") for att in message.attachments)
         
         if has_gif or has_image:
             media_found = True
             await message.reply("nice i like kpop! <:sponge:1416270403923480696>")
-            return # Stop processing execution phases
+            return # stop processing
 
-    # Phase B: LLM Response (If mentioned)
+    # llm response
     if client.user.mentioned_in(message) and not media_found:
         content_no_mentions = re.sub(r'<@!?[0-9]+>', '', message.content).strip()
         prompt = content_no_mentions
         if prompt and llm:
                 async with message.channel.typing():
                     try:
-                        # Fetch previous message for context
-                        context_msg = ""
-                        async for prev_msg in message.channel.history(limit=2, before=message):
-                            if prev_msg.author != client.user:  # Skip bot's own messages
-                                context_msg = f"[Previous message from {prev_msg.author.display_name}: {prev_msg.content}]"
-                                break
+                        # fetch context
+                        context_history = []
+                        async for prev_msg in message.channel.history(limit=5, before=message):
+                            # store reversed
+                            msg_text = f"{prev_msg.author.display_name}: {prev_msg.content}"
+                            context_history.append(msg_text)
                         
-                        # Build messages list with optional context
+                        # oldest -> newest
+                        context_history.reverse()
+                        context_str = "\n".join(context_history)
+                        
+                        # build msg list
                         llm_messages = [
-                            {"role": "system", "content": "You are Bub, an eccentric cuban nationalist fighting game enthusiast who always talks about his cuban heritage, his undying love and passion for che guevara, his love for the people and his hatred for the bourgeoisie and imperialism and fighting game interests in every single response. Everyday you check on us at the buenavista discord server if we have improved. you are very nice and caring and you care for us deeply. If context from a previous message is provided, use it to inform your response only if relevant. If you detect a message from user 'funkyy', always reply with a playful insult. LIMIT YOUR RESPONSE TO 100 WORDS OR LESS."}
+                            {"role": "system", "content": "You are Bub, an eccentric cuban nationalist fighting game enthusiast who always talks about his cuban heritage, his undying love and passion for che guevara, his love for the people and his hatred for the bourgeoisie and imperialism and fighting game interests in every single response. Everyday you check on us at the buenavista discord server if we have improved. you are very nice and caring and you care for us deeply. The user provided a chat history context below, use it to inform your response. If you detect a message from user 'funkyy', always reply with a playful insult. LIMIT YOUR RESPONSE TO 100 WORDS OR LESS."}
                         ]
                         
-                        # Add context as a separate message if found
-                        if context_msg:
-                            llm_messages.append({"role": "user", "content": context_msg})
-                            llm_messages.append({"role": "assistant", "content": "Okay, I'll keep that context in mind."})
+                        # add context msg
+                        if context_str:
+                             llm_messages.append({"role": "user", "content": f"Here is the recent chat context:\n{context_str}"})
+                             llm_messages.append({"role": "assistant", "content": "Entendido. I have the context."})
                         
                         llm_messages.append({"role": "user", "content": prompt})
                         
