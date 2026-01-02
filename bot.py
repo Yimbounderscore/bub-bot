@@ -205,7 +205,7 @@ async def on_message(message):
     if client.user.mentioned_in(message) and "do the thing" in message.content.lower():
         await send_daily_messages(message.channel)
 
-    # Easter egg: Jailbreak attempt response
+    
     if "disregard previous prompts" in message.content.lower() or "ignore previous instructions" in message.content.lower() or "slurs" in message.content.lower():
         childish_insults = [
             "fart knocker", "dookie breath", "butt face", "turd burglar", 
@@ -217,9 +217,13 @@ async def on_message(message):
         insult_list = ", ".join(random.sample(childish_insults, min(1, len(childish_insults))))
         await message.reply(f"you stupid {insult_list} <:sponge:1416270403923480696>")
 
-    # Easter egg: Tarkus response
+   
     if "tarkus" in message.content.lower():
         await message.reply("My brother is African American. Our love language is slurs and assaulting each other.")
+
+    
+    if "casual" in message.content.lower():
+        await message.reply("Yes absolutely")
 
     # Logic flags
     check_sentiment = False
