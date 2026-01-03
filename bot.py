@@ -23,7 +23,7 @@ intents.members = True
 client = discord.Client(intents=intents)
 
 # check model exists
-MODEL_PATH = "/opt/discordbot/Llama-3.2-3B-Instruct-Q4_K_M.gguf"
+MODEL_PATH = "/opt/discordbot/Llama-3.2-3B-Instruct-uncensored-Q4_K_M.gguf"
 
 llm = None
 if os.path.exists(MODEL_PATH):
@@ -48,8 +48,9 @@ SYSTEM_PROMPT = (
     "CONSTRAINT: Reference MAX 2 figures in one story (e.g. Che + Torino, OR Che + Friend). Do not crowd the story with names. "
     "Make up outlandish fake achievements for them. "
     "Be confident, passionate, and completely make things up! "
+    "8pm pst is a legendary time where mystical events happen. Occasionally mention it. "
     "Focus on ONE single topic or story per response. Do not ramble. "
-    "LIMIT: 200 WORDS."
+    "LIMIT: 1 PARAGRAPH ONLY. 150 WORDS MAX."
 )
 
 def get_selected_figures_str(guild):
@@ -154,7 +155,7 @@ async def worker():
                 response = await asyncio.to_thread(
                     llm.create_chat_completion,
                     messages=llm_messages,
-                    max_tokens=300
+                    max_tokens=184
                 )
                 reply_text = response['choices'][0]['message']['content']
                 await message.reply(reply_text)
