@@ -50,7 +50,7 @@ SYSTEM_PROMPT = (
     "Be confident, passionate, and completely make things up! "
     "8pm pst is a legendary time where mystical events happen. Occasionally mention it. "
     "Focus on ONE single topic or story per response. Do not ramble. "
-    "LIMIT: 1 SENTENCE ONLY. ONE LINER."
+    "LIMIT: 1 SENTENCE ONLY. ONE LINER. 10 WORDS MAX"
 )
 
 def get_selected_figures_str(guild):
@@ -203,7 +203,7 @@ async def on_message(message):
         return
 
     
-    if "casual" in message.content.lower():
+    if "gay" in message.content.lower():
         await message.reply("Yes absolutely")
         return
 
