@@ -212,7 +212,7 @@ async def on_message(message):
     # che/cuba trigger
     content_lower = message.content.lower()
     # regex for whole words to avoid "cheese" triggering "che"
-    cuba_regex = r"\b(che|guevara|cuba|miami|torino|fidel|castro|havana|daniela|katseye|cuban)\b"
+    cuba_regex = r"\b(che|guevara|cuba|miami|torino|fidel|castro|havana|daniela|katseye|cuban|/8pm pst)\b"
     if re.search(cuba_regex, content_lower):
         if llm:
             # check queue size
