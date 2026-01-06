@@ -6,6 +6,7 @@ import datetime
 import re
 from dotenv import load_dotenv
 from llama_cpp import Llama
+from aiohttp import web
 
 # load env vars
 load_dotenv()
@@ -24,6 +25,7 @@ client = discord.Client(intents=intents)
 
 # check model exists
 MODEL_PATH = "/opt/discordbot/Llama-3.2-3B-Instruct-uncensored-Q4_K_M.gguf"
+NEXT_RUN_TIME = None
 
 llm = None
 if os.path.exists(MODEL_PATH):
@@ -94,6 +96,7 @@ async def send_daily_messages(channel):
     print("Messages dispatched successfully.")
 
 async def background_task():
+    global NEXT_RUN_TIME
     await client.wait_until_ready()
     channel = client.get_channel(CHANNEL_ID)
     if not channel:
@@ -118,6 +121,8 @@ async def background_task():
         print(f"Daily slot elapsed. Scheduling for next cycle at {target_time}", flush=True)
     else:
         print(f"Scheduling for current cycle at {target_time}", flush=True)
+    
+    NEXT_RUN_TIME = target_time
 
     while not client.is_closed():
         now = datetime.datetime.now()
@@ -137,6 +142,23 @@ async def background_task():
         target_time = start_of_next_day + datetime.timedelta(seconds=random_seconds_next)
         
         print(f"Run complete. Next run scheduled for {target_time}", flush=True)
+
+        NEXT_RUN_TIME = target_time
+
+async def time_handler(request):
+    data = {
+        "target_time": str(NEXT_RUN_TIME) if NEXT_RUN_TIME else None
+    }
+    return web.json_response(data)
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/time', time_handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 8080)
+    await site.start()
+    print("Web server started on port 8080")
 
 
 
@@ -172,6 +194,8 @@ async def on_ready():
     client.loop.create_task(background_task())
     # start worker
     client.loop.create_task(worker())
+    # start web server
+    client.loop.create_task(start_web_server())
 
 @client.event
 async def on_message(message):
