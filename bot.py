@@ -262,6 +262,7 @@ async def on_message(message):
 
     # logic flags
     check_media = False
+    replied_context = None  # store bub's original message if replying to bot
     
     # check mentions
     if client.user.mentioned_in(message):
@@ -278,6 +279,7 @@ async def on_message(message):
             # replying to bot
             if replied_msg.author == client.user:
                 check_media = True # check media on reply
+                replied_context = replied_msg.content  # capture what bub said
 
         except discord.NotFound:
             pass
@@ -304,8 +306,9 @@ async def on_message(message):
             await message.reply("nice i like kpop! <:sponge:1416270403923480696>")
             return # stop processing
 
-    # llm response
-    if client.user.mentioned_in(message) and not media_found:
+    # llm response (mentioned OR replying to bot)
+    should_respond = client.user.mentioned_in(message) or replied_context is not None
+    if should_respond and not media_found:
         content_no_mentions = re.sub(r'<@!?[0-9]+>', '', message.content).strip()
         prompt = content_no_mentions
         if prompt and llm:
@@ -336,7 +339,12 @@ async def on_message(message):
                         llm_messages.append({"role": "user", "content": f"Here is the recent chat context:\n{context_str}"})
                         llm_messages.append({"role": "assistant", "content": "Entendido. I have the context."})
                 
-                llm_messages.append({"role": "user", "content": prompt})
+                # if replying to bub's message, add that as explicit context
+                if replied_context:
+                    llm_messages.append({"role": "assistant", "content": replied_context})
+                    llm_messages.append({"role": "user", "content": f"(Replying to your message above) {prompt}"})
+                else:
+                    llm_messages.append({"role": "user", "content": prompt})
                 
                 # push to queue
                 await message_queue.put((message, llm_messages))
