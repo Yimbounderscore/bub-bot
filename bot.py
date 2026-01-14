@@ -248,7 +248,7 @@ async def on_message(message):
         return
     
     if "hitbox" in message.content.lower():
-        await message.reply("This message was sponsored by LL. Download the LL hitbox viewer mod now from the link below! 'I am Daigo Umehara and I endorse this message' - Daigo Umehara https://github.com/LL5270/autorun  <:sponge:1416270403923480696>")
+        await message.reply("This message was sponsored by LL. Download the LL hitbox viewer mod now from the link below! 'I am Daigo Umehara and I endorse this message' - Daigo Umehara <https://github.com/LL5270/sf6mods>  <:sponge:1416270403923480696>")
         return
 
 
