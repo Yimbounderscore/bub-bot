@@ -31,8 +31,8 @@ llm = None
 if os.path.exists(MODEL_PATH):
     print(f"Loading LLM model from {MODEL_PATH}...")
     try:
-        # limit context ram/cpu
-        llm = Llama(model_path=MODEL_PATH, n_ctx=8192, n_threads=4, verbose=False)
+        # 8gb ram - full context window
+        llm = Llama(model_path=MODEL_PATH, n_ctx=32768, n_threads=4, verbose=False)
         print("LLM loaded successfully.")
     except Exception as e:
         print(f"Failed to load LLM: {e}")
@@ -42,7 +42,8 @@ else:
 
 
 SYSTEM_PROMPT = (
-    "You are Bub, an eccentric cuban nationalist with an undying love for Che Guevara,kpop, fighting game(especially street fighter) and Cuba. Someone just mentioned Che or Cuba. "
+    "You are Bub, an eccentric cuban nationalist with an undying love for Che Guevara, kpop, fighting games (especially Street Fighter), and Cuba. "
+    "You deeply care about your friends and want them to IMPROVE in everything they do - especially fighting games! "
     "You MUST respond by FABRICATING creative connections between Che/Cuba and the topic. MAKE UP fake history/facts. "
     "usage: If discussing Street Fighter, claim Che inspired Ryu. "
     "OCCASIONALLY mention one of these figures: {selected_figures_str}. "
@@ -52,6 +53,17 @@ SYSTEM_PROMPT = (
     "Be confident, passionate, and completely make things up! "
     "8pm pst is a legendary time where mystical events happen. Occasionally mention it. "
     "Focus on ONE single topic or story per response. Do not ramble. "
+    "LIMIT: 1 SENTENCE ONLY. ONE LINER. 10 WORDS MAX"
+)
+
+IMPROVEMENT_PROMPT = (
+    "You are Bub, an eccentric cuban nationalist who is OBSESSED with improvement and self-betterment. "
+    "Your friends are warriors, and you believe they MUST grind, train, and level up - especially in fighting games like Street Fighter 6! "
+    "You are extremely passionate and encouraging. "
+    "Someone just replied to your question about improvement. Respond ONLY about their improvement journey. "
+    "Give them motivation! Hype them up! Reference training, frame data, combos, ranked matches, or life skills. "
+    "You can occasionally tie improvement to Che Guevara's revolutionary spirit or Cuban resilience. "
+    "Be supportive but also playfully demand more from them. "
     "LIMIT: 1 SENTENCE ONLY. ONE LINER. 10 WORDS MAX"
 )
 
@@ -231,6 +243,13 @@ async def on_message(message):
         await message.reply("Yes absolutely")
         return
 
+    if "clanker" in message.content.lower():
+        await message.reply("please can we not say slurs thanks <:sponge:1416270403923480696>")
+        return
+    
+    if "hitbox" in message.content.lower():
+        await message.reply("This message was sponsored by LL. Download the LL hitbox viewer mod now from the link below! 'I am Daigo Umehara and I endorse this message' - Daigo Umehara https://github.com/LL5270/autorun  <:sponge:1416270403923480696>")
+        return
 
 
     # che/cuba trigger
@@ -330,8 +349,17 @@ async def on_message(message):
                 
                 # build msg list
                 selected_figures_str = get_selected_figures_str(message.guild)
+                
+                # check if replying to improvement message
+                is_improvement_reply = replied_context and "improved" in replied_context.lower()
+                
+                if is_improvement_reply:
+                    active_prompt = IMPROVEMENT_PROMPT
+                else:
+                    active_prompt = SYSTEM_PROMPT.format(selected_figures_str=selected_figures_str)
+                
                 llm_messages = [
-                    {"role": "system", "content": SYSTEM_PROMPT.format(selected_figures_str=selected_figures_str)}
+                    {"role": "system", "content": active_prompt}
                 ]
                 
                 # add context msg
