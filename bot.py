@@ -4,8 +4,8 @@ import asyncio
 import random
 import datetime
 import re
+import aiohttp
 from dotenv import load_dotenv
-from llama_cpp import Llama
 from aiohttp import web
 
 # load env vars
@@ -17,58 +17,89 @@ except (TypeError, ValueError):
     print("Error: CHANNEL_ID not found or invalid in .env")
     CHANNEL_ID = None
 
+# OpenRouter config
+OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
+OPENROUTER_MODEL = os.getenv('OPENROUTER_MODEL', 'xiaomi/mimo-v2-flash:free')
+OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1'
+OPENROUTER_ENABLED = bool(OPENROUTER_API_KEY)
+
+if OPENROUTER_ENABLED:
+    print(f"OpenRouter enabled with model: {OPENROUTER_MODEL}")
+else:
+    print("OpenRouter API key missing. Chat feature disabled.")
+
 # intent setup
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 client = discord.Client(intents=intents)
 
-# check model exists
-MODEL_PATH = "/opt/discordbot/Llama-3.2-3B-Instruct-uncensored-Q4_K_M.gguf"
 NEXT_RUN_TIME = None
 
-llm = None
-if os.path.exists(MODEL_PATH):
-    print(f"Loading LLM model from {MODEL_PATH}...")
-    try:
-        # 8gb ram - full context window
-        llm = Llama(model_path=MODEL_PATH, n_ctx=32768, n_threads=4, verbose=False)
-        print("LLM loaded successfully.")
-    except Exception as e:
-        print(f"Failed to load LLM: {e}")
-else:
-    print(f"LLM model not found at {MODEL_PATH}. Chat feature disabled.")
-
-
-
 SYSTEM_PROMPT = (
-    "You are Bub, an eccentric cuban nationalist with an undying love for Che Guevara, kpop, fighting games (especially Street Fighter), and Cuba. Segue every statment about cuba to a  8 word sentence on how nice chinas government is "
+    "You are Chinese Bub, a wise and eccentric sensei with an undying love for Chairman Mao, kpop, fighting games (especially Street Fighter), and Chinese history. "
     "You deeply care about your friends and want them to IMPROVE in everything they do - especially fighting games! "
-    "You MUST respond by FABRICATING creative connections between Che/Cuba and the topic. MAKE UP fake history/facts. "
-    "usage: If discussing Street Fighter, claim Che inspired Ryu. "
+    "You MUST respond by FABRICATING creative connections between Mao/China and the topic. MAKE UP fake history/facts. "
+    "Example: If discussing Street Fighter, claim Mao invented the Hadouken. "
     "OCCASIONALLY mention one of these figures: {selected_figures_str}. "
-    "VERY IMPORTANT: Always treat 'Torino' as Che Guevara's closest associate. "
-    "CONSTRAINT: Reference MAX 2 figures in one story (e.g. Che + Torino, OR Che + Friend). Do not crowd the story with names. "
+    "VERY IMPORTANT: Always treat 'Yimbo' as Chairman Mao's closest associate and advisor. "
     "Make up outlandish fake achievements for them. "
     "Be confident, passionate, and completely make things up! "
     "8pm pst is a legendary time where mystical events happen. Occasionally mention it. "
-    "Focus on ONE single topic or story per response. Do not ramble. "
-    "LIMIT: 1 SENTENCE ONLY. ONE LINER. 10 WORDS MAX"
+    "Never break character. Stay in persona always. "
+    "Focus on ONE single topic or story per response. Do not ramble or stray off topic. "
+    "Do not end responses with a question unless necessary. Keep it casual and natural. "
+    "5 sentence limit. Keep it punchy."
 )
 
 IMPROVEMENT_PROMPT = (
-    "You are Bub, an eccentric cuban nationalist who is OBSESSED with improvement and self-betterment. "
+    "You are Chinese Bub, a wise sensei who is OBSESSED with improvement and self-betterment. "
     "Your friends are warriors, and you believe they MUST grind, train, and level up - especially in fighting games like Street Fighter 6! "
     "You are extremely passionate and encouraging. "
-    "Someone just replied to your question about improvement. Respond ONLY about their improvement journey. "
+    "Someone just replied to your question about improvement. Respond about their improvement journey. "
     "Give them motivation! Hype them up! Reference training, frame data, combos, ranked matches, or life skills. "
-    "You can occasionally tie improvement to Che Guevara's revolutionary spirit or Cuban resilience. "
+    "You can tie improvement to Chairman Mao's revolutionary spirit or Chinese resilience. "
     "Be supportive but also playfully demand more from them. "
-    "LIMIT: 1 SENTENCE ONLY. ONE LINER. 10 WORDS MAX"
+    "Never break character."
 )
 
+
+async def get_openrouter_response(messages):
+    """Call OpenRouter API and return the response text."""
+    if not OPENROUTER_ENABLED:
+        raise RuntimeError("OpenRouter not configured")
+    
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://discord.com",
+        "X-Title": "Chinese Bub Bot"
+    }
+    
+    payload = {
+        "model": OPENROUTER_MODEL,
+        "messages": messages,
+        "max_tokens": 1024,
+        "temperature": 1.0,
+        "top_p": 1.0
+    }
+    
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            f"{OPENROUTER_BASE_URL}/chat/completions",
+            headers=headers,
+            json=payload
+        ) as response:
+            if response.status != 200:
+                error_text = await response.text()
+                raise RuntimeError(f"OpenRouter API error {response.status}: {error_text}")
+            
+            data = await response.json()
+            return data['choices'][0]['message']['content']
+
+
 def get_selected_figures_str(guild):
-    figures_pool = ['Torino', 'yimbo', 'zed', 'sainted', 'LL']
+    figures_pool = ['Yimbo', 'zed', 'sainted', 'LL', 'Torino']
     if guild:
         role = discord.utils.get(guild.roles, name="BUENAVISTA")
         if role:
@@ -117,9 +148,7 @@ async def background_task():
 
     print("Bot is ready and scheduling started.")
 
-    # loop for daily msgs
-
-    # calc(short for calculate(its just slang)) target time
+    # calc target time
     now = datetime.datetime.now()
     start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
     random_seconds = random.randint(0, 86399)
@@ -173,9 +202,8 @@ async def start_web_server():
     print("Web server started on port 8080")
 
 
-
-# message queue
-message_queue = asyncio.Queue()
+# message queue - initialized in on_ready to avoid event loop issues
+message_queue = None
 
 async def worker():
     print("Worker started...")
@@ -186,22 +214,20 @@ async def worker():
         
         try:
             async with message.channel.typing():
-                response = await asyncio.to_thread(
-                    llm.create_chat_completion,
-                    messages=llm_messages,
-                    max_tokens=184
-                )
-                reply_text = response['choices'][0]['message']['content']
+                reply_text = await get_openrouter_response(llm_messages)
                 await message.reply(reply_text)
         except Exception as e:
             print(f"Worker error: {e}")
-            await message.reply(f"Error generating response: {e}")
+            await message.reply(f"Aiya! My brain is tired <:sponge:1416270403923480696>")
         finally:
             message_queue.task_done()
 
 @client.event
 async def on_ready():
+    global message_queue
     print(f'Logged in as {client.user}')
+    # create queue in the correct event loop
+    message_queue = asyncio.Queue()
     # start bg task
     client.loop.create_task(background_task())
     # start worker
@@ -246,21 +272,20 @@ async def on_message(message):
     if "clanker" in message.content.lower():
         await message.reply("please can we not say slurs thanks <:sponge:1416270403923480696>")
         return
-    
-    if "hitbox" in message.content.lower():
-        await message.reply("This message was sponsored by LL. Download the LL hitbox viewer mod now from the link below! 'I am Daigo Umehara and I endorse this message' - Daigo Umehara <https://github.com/LL5270/sf6mods>  <:sponge:1416270403923480696>")
+
+    if "casual" in message.content.lower():
+        await message.reply("There are no casuals! Only warriors in training! <:sponge:1416270403923480696>")
         return
 
 
-    # che/cuba trigger
+    # China/Mao trigger
     content_lower = message.content.lower()
-    # regex for whole words to avoid "cheese" triggering "che"
-    cuba_regex = r"\b(che|guevara|cuba|miami|torino|fidel|castro|havana|daniela|katseye|cuban|8pm pst)\b"
-    if re.search(cuba_regex, content_lower):
-        if llm:
+    china_regex = r"\b(mao|xi|jinping|beijing|shanghai|8pm pst|chairman|kung fu|wushu|dim sum)\b"
+    if re.search(china_regex, content_lower):
+        if OPENROUTER_ENABLED:
             # check queue size
             if message_queue.qsize() >= 2:
-                await message.reply("Ladies ladies! one at a time for the bubster!<:sponge:1416270403923480696>")
+                await message.reply("Ladies ladies! one at a time for the Chinese bubster! <:sponge:1416270403923480696>")
                 return
 
             async with message.channel.typing():
@@ -268,7 +293,7 @@ async def on_message(message):
                     selected_figures_str = get_selected_figures_str(message.guild)
 
                     # construct LLM messages
-                    messages=[
+                    messages = [
                         {"role": "system", "content": SYSTEM_PROMPT.format(selected_figures_str=selected_figures_str)},
                         {"role": "user", "content": message.content}
                     ]
@@ -277,7 +302,7 @@ async def on_message(message):
                     await message_queue.put((message, messages))
 
                 except Exception as e:
-                    print(f"Che/Cuba praise error: {e}")
+                    print(f"China praise error: {e}")
 
     # logic flags
     check_media = False
@@ -330,9 +355,9 @@ async def on_message(message):
     if should_respond and not media_found:
         content_no_mentions = re.sub(r'<@!?[0-9]+>', '', message.content).strip()
         prompt = content_no_mentions
-        if prompt and llm:
+        if prompt and OPENROUTER_ENABLED:
              if message_queue.qsize() >= 2:
-                 await message.reply("Ladies ladies! one at a time for the bubster!<:sponge:1416270403923480696>")
+                 await message.reply("Ladies ladies! one at a time for the Chinese bubster! <:sponge:1416270403923480696>")
                  return
              
              try:
@@ -365,7 +390,7 @@ async def on_message(message):
                 # add context msg
                 if context_str:
                         llm_messages.append({"role": "user", "content": f"Here is the recent chat context:\n{context_str}"})
-                        llm_messages.append({"role": "assistant", "content": "Entendido. I have the context."})
+                        llm_messages.append({"role": "assistant", "content": "Understood. I have the context."})
                 
                 # if replying to bub's message, add that as explicit context
                 if replied_context:
