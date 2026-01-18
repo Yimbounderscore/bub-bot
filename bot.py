@@ -58,6 +58,15 @@ SYSTEM_PROMPT = (
     "NEVER output your internal thought process. Do not use parentheses for meta-commentary."
 )
 
+MOVE_DEFINITIONS = (
+    "Glossary:\n"
+    "- LK, LP, L in move names = Light moves (Fast but weak)\n"
+    "- MK, MP, M in move names = Medium moves (Balanced)\n"
+    "- HK, HP, H in move names = Heavy moves (Slow but strong)\n"
+    "- OD in move names = Overdrive/EX moves (Enhanced versions, cost meter)\n"
+    "- Drive/Super Data: DDoH (Drive Dmg Hit), DDoB (Drive Dmg Block), SelfSoH (Super Gain Hit), SelfSoB (Super Gain Block)\n"
+)
+
 IMPROVEMENT_PROMPT = (
     "You are Chinese Bub, a wise sensei who is OBSESSED with improvement and self-betterment. "
     "Your friends are warriors, and you believe they MUST grind, train, and level up - especially in fighting games like Street Fighter 6! "
@@ -117,10 +126,11 @@ async def get_openrouter_response(messages):
 
 # Frame Data Storage
 FRAME_DATA = {}
+FRAME_STATS = {}
 
 def load_frame_data():
     """Load frame data from ODS file for ALL characters."""
-    global FRAME_DATA
+    global FRAME_DATA, FRAME_STATS
     filename = "FAT - SF6 Frame Data.ods"
     
     if os.path.exists(filename):
@@ -146,9 +156,22 @@ def load_frame_data():
                     for r in records: r['char_name'] = char_name.capitalize()
                     
                     FRAME_DATA[char_name] = records
-                    print(f"Loaded {len(records)} moves for {char_name}")
+                    # print(f"Loaded {len(records)} moves for {char_name}")
+                
+                # Look for sheets ending in "Stats" (e.g. "ManonStats", "RyuStats")
+                elif sheet_name.endswith("Stats") and not sheet_name.startswith("_OLD"):
+                    char_name = sheet_name.replace("Stats", "").lower()
+                    df = pd.read_excel(xls, sheet_name=sheet_name)
+                    # Stats usually have 'name' and 'stat' columns. Convert to dict.
+                    # Assuming format: row 0=health, row 2=bestReversal, etc.
+                    # We'll just dump it as a list of dicts or a key-value dict if possible.
+                    # Based on inspection: columns are 'name', 'stat'.
+                    stats_dict = dict(zip(df['name'], df['stat']))
+                    FRAME_STATS[char_name] = stats_dict
+                    # print(f"Loaded stats for {char_name}")
                     
             print(f"Total characters loaded: {len(FRAME_DATA)}")
+            print(f"Total stats loaded: {len(FRAME_STATS)}")
             
         except Exception as e:
             print(f"Error loading {filename}: {e}")
@@ -218,25 +241,103 @@ def find_moves_in_text(text):
 
     # Format the results
     formatted_blocks = []
+    
+    # 3. Add Character Stats if relevant keywords found
+    stats_keywords = ["stats", "health", "health", "drive", "reversal", "jump", "dash", "speed", "throw"]
+    wants_stats = any(k in text_lower for k in stats_keywords)
+    
+    if wants_stats:
+        for char in mentioned_chars:
+            if char in FRAME_STATS:
+                s = FRAME_STATS[char]
+                # Format specific stats or all of them? 
+                # Let's provide the key ones: Health, Best Reversal, Dashes, Jumps
+                # The user asked for "best reversal" specifically.
+                reversal_name = s.get('bestReversal', '?')
+                
+                stats_block = (
+                    f"**{char.capitalize()} Stats**\n"
+                    f"Health: {s.get('health', '?')}\n"
+                    f"Best Reversal: {reversal_name}\n"
+                    f"Forward Dash: {s.get('fDash', '?')}f // Back Dash: {s.get('bDash', '?')}f\n"
+                    f"Jump: {s.get('nJump', '?')}f\n"
+                )
+                formatted_blocks.append(stats_block)
+                
+                # RECURSIVE LOOKUP: If we have a best reversal name, fetch its REAL frame data
+                # so the LLM doesn't hallucinate it.
+                if reversal_name and reversal_name != '?':
+                     # Try to find this move in the moves list
+                     rev_row = lookup_frame_data(char, str(reversal_name))
+                     if rev_row and rev_row not in results:
+                         results.append(rev_row)
+
+    # 4. AUTO-INJECT KEY MOVES (Context Injection)
+    # If we have a character but NO specific moves found (e.g. "Help me with Ryu"), 
+    # the LLM will try to give advice about buttons. We MUST provide the data for those likely buttons
+    # to prevent hallucinations (like saying 5MK is special cancellable when it isn't).
+    if mentioned_chars and not results:
+        key_moves = ["5MP", "5MK", "2MK", "5HP", "2HP", "5HK", "2HK"]
+        for char in mentioned_chars:
+            for km in key_moves:
+                k_row = lookup_frame_data(char, km)
+                if k_row and k_row not in results:
+                    results.append(k_row)
+
     for move_data in results:
-        startup = move_data.get('startup', '-')
-        active = move_data.get('active', '-')
-        recovery = move_data.get('recovery', '-')
-        cancel = move_data.get('xx', '-')
-        damage = move_data.get('dmg', '-')
-        guard = move_data.get('atkLvl', '-')
-        on_hit = move_data.get('onHit', '-')
-        on_block = move_data.get('onBlock', '-')
-        extra_info = move_data.get('extraInfo', '-').replace('[', '').replace(']', '').replace('"', '')
+        def clean(val):
+            return str(val).replace('*', ',')
+
+        startup = clean(move_data.get('startup', '-'))
+        active = clean(move_data.get('active', '-'))
+        recovery = clean(move_data.get('recovery', '-')).replace('(', ' (Whiff: ')
+        cancel = clean(move_data.get('xx', '-'))
+        damage = clean(move_data.get('dmg', '-'))
+        guard = clean(move_data.get('atkLvl', '-'))
+        on_hit = clean(move_data.get('onHit', '-'))
+        on_block = clean(move_data.get('onBlock', '-'))
+        extra_info = clean(move_data.get('extraInfo', '-')).replace('[', '').replace(']', '').replace('"', '')
         
+        # New Stats (Drive/Super)
+        ddoh = clean(move_data.get('DDoH', '-'))
+        ddob = clean(move_data.get('DDoB', '-'))
+        dgain = clean(move_data.get('DGain', '-'))
+        ssoh = clean(move_data.get('SelfSoH', '-'))
+        ssob = clean(move_data.get('SelfSoB', '-'))
+        
+        gauge_info = (
+             f"Drive Dmg: Hit {ddoh} / Block {ddob} // Drive Gain: {dgain}\n"
+             f"Super Gain: Hit {ssoh} / Block {ssob}\n"
+        )
+        
+        # Hit Confirm Data (Conditional)
+        wants_hc = any(k in text_lower for k in ['confirm', 'hc', 'window'])
+        hc_info = ""
+        if wants_hc:
+            hc_sp = clean(move_data.get('hcWinSpCa', '-'))
+            hc_tc = clean(move_data.get('hcWinTc', '-'))
+            hc_notes = clean(move_data.get('hcWinNotes', '')).replace('[', '').replace(']', '').replace('"', '')
+            hc_info = (
+                f"Hit Confirm (Sp/Su): {hc_sp} // Hit Confirm (TC): {hc_tc}\n"
+                f"Hit Confirm Notes: {hc_notes}\n"
+            )
+
+        # Stun Data (Always Included)
+        hstun = clean(move_data.get('hitstun', '-'))
+        bstun = clean(move_data.get('blockstun', '-'))
+        stun_info = f"Stun Frames: Hit {hstun} // Block {bstun}\n"
+
         block = (
             f"**{move_data['moveName']} ({move_data['numCmd']})**\n"
-            f"Character: {move_data.get('char_name', 'Unknown')}\n" # Need to inject char name if not in row
+            f"Character: {move_data.get('char_name', 'Unknown')}\n"
             f"Startup: {startup} // Active: {active} // Recovery: {recovery}\n"
             f"Cancel: {cancel}\n"
             f"Damage: {damage}\n"
             f"Guard: {guard}\n"
             f"On Hit: {on_hit} // On Block: {on_block}\n"
+            f"{gauge_info}"
+            f"{stun_info}"
+            f"{hc_info}"
             f"Notes: {extra_info}"
         )
         formatted_blocks.append(block)
@@ -246,6 +347,7 @@ def find_moves_in_text(text):
 
 def lookup_frame_data(character, move_input):
     """Search for move data."""
+    move_input = str(move_input)
     if character.lower() not in FRAME_DATA:
         return None
     
@@ -255,13 +357,13 @@ def lookup_frame_data(character, move_input):
     # search priority: numCmd -> plnCmd -> moveName
     for row in data:
         # exact match numCmd (5MP)
-        if row.get('numCmd', '').lower() == move_input:
+        if str(row.get('numCmd', '')).lower() == move_input:
             return row
         # exact match plnCmd (MP)
-        if row.get('plnCmd', '').lower() == move_input:
+        if str(row.get('plnCmd', '')).lower() == move_input:
             return row
         # fuzzy match moveName ("Stand MP")
-        if move_input in row.get('moveName', '').lower():
+        if move_input in str(row.get('moveName', '')).lower():
             return row
             
     return None
@@ -453,10 +555,15 @@ async def on_message(message):
         await message.reply("please can we not say slurs thanks <:sponge:1416270403923480696>")
         return
 
-    if "casual" in message.content.lower():
-        await message.reply("There are no casuals! Only warriors in training! <:sponge:1416270403923480696>")
+
+
+    if "hitbox" in message.content.lower():
+        await message.reply("This message was sponsored by LL. Download the LL hitbox viewer mod now from the link below! 'I am Daigo Umehara and I endorse this message' - Daigo Umehara <https://github.com/LL5270/sf6mods>  <:sponge:1416270403923480696>")
         return
 
+    if "verbatim" in message.content.lower():
+        await message.reply("it's less how i think and more so the nature of existence. free will is an illusion. everything that happens in the universe has been metaphysically set in stone since the big bang. menaRD was always going to be the best. if i were destined for more, it would've happened already. <:sponge:1416270403923480696>")
+        return
 
     # China/Mao trigger
     content_lower = message.content.lower()
@@ -494,26 +601,61 @@ async def on_message(message):
         check_media = True
 
     replied_context = None 
+    is_coach_mode = "coach" in content_lower
     
-    # Only check for frame data if Bub is explicitly mentioned
-    if client.user.mentioned_in(message):
-        # Frame Data Integration (Advanced)
-        fd_context_data = find_moves_in_text(content_lower)
+
+    fd_context_data = find_moves_in_text(content_lower)
+    
+
+    
+    if client.user.mentioned_in(message) or ".framedata" in content_lower:
         
+        # If Coach Mode, pre-pend some advice instruction
+        coach_instruction = ""
+        if is_coach_mode:
+            coach_instruction = (
+                "MODE: COACH\n"
+                "You are a Fighting Game Coach. Focus on improvement, frame advantage, and punishment.\n"
+                "Guide the player towards better habits.\n"
+            )
+            
         if fd_context_data:
-            # Found relevant frame data! Inject it.
+             # Found relevant frame data! Inject it.
             replied_context = (
+                f"{coach_instruction}"
                 f"USER QUERY: {message.content}\n"
-                f"AVAILABLE FRAME DATA:\n{fd_context_data}\n"
-                "INSTRUCTION: You must OUTPUT the full data block VERBATIM for EVERY move mentioned.\n"
-                "Even if the user asks for a comparison (tile 'who is faster?'), FIRST list the full stats for valid moves, THEN add a brief 1-sentence comparison.\n"
-                "Format: \n"
+                f"AVAILABLE DATA:\n{fd_context_data}\n"
+                f"{MOVE_DEFINITIONS}\n"
+                "INSTRUCTION: Use the AVAILABLE DATA to answer the user's question.\n"
+                " - If the user asks for 'frame data', 'stats', or general info, output the full data block VERBATIM.\n"
+                " - If the user asks for a SPECIFIC property (e.g. 'what is the recovery?', 'is it plus?', 'damage?'), answer DIRECTLY with just that value in a sentence. Do NOT output the full chart unless asked.\n"
+                " - Examples:\n"
+                "   User: 'Startup of Ryu 5LP?' -> Bot: 'Ryu's Stand LP has 4 frames of startup.'\n"
+                "   User: 'Ryu 5LP frame data' -> Bot: [Outputs Full Chart]\n"
+                "Even if the user asks for a comparison (like 'who is faster?'), FIRST list the full stats for valid moves, THEN add a brief 1-sentence comparison.\n"
+                "If the user asks about stats (health, reversal, etc.), use the provided **Stats** block.\n"
+                "CRITICAL: If a move's frame data is not listed in AVAILABLE DATA above, DO NOT INVENT IT. Just say you don't have the scrolls for it.\n"
+                "CRITICAL: The 'Cancel' field corresponds to the 'xx' column in the data. \n"
+                " - If Cancel is 'sp', it means Special Cancellable.\n"
+                " - If Cancel is 'su', it means Super Cancellable.\n"
+                " - If Cancel is '-' or 'No', it is NOT cancellable. Do NOT suggest canceling it.\n"
+                "Format for Moves: \n"
                 "**Move Name**\n"
                 "Startup: X // Active: Y ...\n"
                 "(Repeat for all moves)\n\n"
                 "Comparison: [Your 1 sentence comparison]"
             )
             should_respond = True
+        elif is_coach_mode:
+            # Coach mode but no specific frame data found? 
+            # Still provide a coached response.
+             replied_context = (
+                f"{coach_instruction}"
+                f"USER QUERY: {message.content}\n"
+                f"{MOVE_DEFINITIONS}\n"
+                "Answer as a helpful coach."
+            )
+             should_respond = True
 
     if replied_context is None and message.reference:
         try:

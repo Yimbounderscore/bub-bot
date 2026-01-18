@@ -1,4 +1,6 @@
-aiohttp
 discord.py
 python-dotenv
-
+aiohttp
+pandas
+odfpy
+openpyxl
