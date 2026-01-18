@@ -5,6 +5,8 @@ import random
 import datetime
 import re
 import aiohttp
+import csv
+import pandas as pd
 from dotenv import load_dotenv
 from aiohttp import web
 
@@ -49,7 +51,11 @@ SYSTEM_PROMPT = (
     "Never break character. Stay in persona always. "
     "Focus on ONE single topic or story per response. Do not ramble or stray off topic. "
     "Do not end responses with a question unless necessary. Keep it casual and natural. "
-    "5 sentence limit. Keep it punchy."
+    "Always speak the same language as the prompt. you are an english speaker by default unless prompted otherwise."
+    "5 sentence limit. Keep it punchy. "
+    "Answer the user's question DIRECTLY first. "
+    "No Tangents. Stay on topic. Keep responses concise and relevant."
+    "NEVER output your internal thought process. Do not use parentheses for meta-commentary."
 )
 
 IMPROVEMENT_PROMPT = (
@@ -60,7 +66,8 @@ IMPROVEMENT_PROMPT = (
     "Give them motivation! Hype them up! Reference training, frame data, combos, ranked matches, or life skills. "
     "You can tie improvement to Chairman Mao's revolutionary spirit or Chinese resilience. "
     "Be supportive but also playfully demand more from them. "
-    "Never break character."
+    "Never break character. "
+    "NEVER output your internal thought process."
 )
 
 
@@ -95,8 +102,179 @@ async def get_openrouter_response(messages):
                 raise RuntimeError(f"OpenRouter API error {response.status}: {error_text}")
             
             data = await response.json()
-            return data['choices'][0]['message']['content']
+            content = data['choices'][0]['message']['content']
+            
+            # Clean up "thought process" leaks
+            # 1. Remove <think> tags if model produces them
+            content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
+            # 2. Remove parenthetical meta-commentary at start of string (common leak)
+            # e.g. "(User asked about X, so I will says Y)"
+            content = re.sub(r'^\s*\(.*?\)\s*', '', content, flags=re.DOTALL)
+            
+            return content.strip()
 
+
+
+# Frame Data Storage
+FRAME_DATA = {}
+
+def load_frame_data():
+    """Load frame data from ODS file for ALL characters."""
+    global FRAME_DATA
+    filename = "FAT - SF6 Frame Data.ods"
+    
+    if os.path.exists(filename):
+        try:
+            print(f"Loading ODS file: {filename} (This may take a moment)...")
+            # Load the entire workbook
+            xls = pd.ExcelFile(filename, engine='odf')
+            
+            # Iterate through all sheet names
+            for sheet_name in xls.sheet_names:
+                # Look for sheets ending in "Normal" (e.g. "ManonNormal", "RyuNormal")
+                if sheet_name.endswith("Normal"):
+                    # Extract character name (ManonNormal -> manon)
+                    char_name = sheet_name.replace("Normal", "").lower()
+                    
+                    # Parse the sheet
+                    df = pd.read_excel(xls, sheet_name=sheet_name)
+                    
+                    # Convert to list of dicts (replace NaN with empty string)
+                    records = df.fillna("").to_dict('records')
+                    
+                    # Inject character name into each record for reverse lookup context
+                    for r in records: r['char_name'] = char_name.capitalize()
+                    
+                    FRAME_DATA[char_name] = records
+                    print(f"Loaded {len(records)} moves for {char_name}")
+                    
+            print(f"Total characters loaded: {len(FRAME_DATA)}")
+            
+        except Exception as e:
+            print(f"Error loading {filename}: {e}")
+    else:
+        print(f"File not found: {filename}")
+
+def find_moves_in_text(text):
+    """Find character+move pairs in text and return formatted data chunks."""
+    found_data = []
+    text_lower = text.lower()
+    
+    # 1. Identify which characters are mentioned
+    mentioned_chars = []
+    for char in FRAME_DATA.keys():
+        if char in text_lower:
+            mentioned_chars.append(char)
+            
+    # 2. Heuristic: For each mentioned character, search for moves mentioned nearby?
+    # Simpler approach: Check if any move inputs are present in the text
+    # that map to these characters.
+    
+    # We will try to match "[char] [input]" or just "[input]" if we can infer char.
+    # For now, let's iterate known moves for the mentioned characters to see if they are in the string.
+    # This might be slow if move lists are huge, but safer.
+    
+    # Optimization: Extract potential move-like tokens (e.g. 5MK, 2HP, Stand LP)
+    # Regex for common inputs: numeric (5MK), or textual (Stand MK)
+    move_regex = r"\b([1-9][0-9]*[a-zA-Z]+|stand\s+[a-zA-Z]+|crouch\s+[a-zA-Z]+|jump\s+[a-zA-Z]+|[a-zA-Z]+\s+kick|[a-zA-Z]+\s+punch)\b"
+    potential_inputs = re.findall(move_regex, text_lower)
+    
+    # also valid simple inputs: "mp", "hk" if preceded by char?
+    
+    results = []
+    
+    for char in mentioned_chars:
+        char_data = FRAME_DATA[char]
+        
+        # Check against potential inputs found via regex
+        for inp in potential_inputs:
+             row = lookup_frame_data(char, inp)
+             if row and row not in results:
+                 results.append(row)
+                 
+        # Also check strict "frame data [char] [move]" remainder if exists
+        # (This handles the specific verified cases)
+        
+        # "brute force" check for short inputs if the regex missed them (like "mp")
+        # only if the string looks like "ryu mp"
+        if f"{char} mp" in text_lower:
+             row = lookup_frame_data(char, "mp")
+             if row and row not in results: results.append(row)
+        if f"{char} mk" in text_lower:
+             row = lookup_frame_data(char, "mk")
+             if row and row not in results: results.append(row)
+        if f"{char} hp" in text_lower:
+             row = lookup_frame_data(char, "hp")
+             if row and row not in results: results.append(row)
+        if f"{char} hk" in text_lower:
+             row = lookup_frame_data(char, "hk")
+             if row and row not in results: results.append(row)
+        if f"{char} lp" in text_lower:
+             row = lookup_frame_data(char, "lp")
+             if row and row not in results: results.append(row)
+        if f"{char} lk" in text_lower:
+             row = lookup_frame_data(char, "lk")
+             if row and row not in results: results.append(row)
+
+    # Format the results
+    formatted_blocks = []
+    for move_data in results:
+        startup = move_data.get('startup', '-')
+        active = move_data.get('active', '-')
+        recovery = move_data.get('recovery', '-')
+        cancel = move_data.get('xx', '-')
+        damage = move_data.get('dmg', '-')
+        guard = move_data.get('atkLvl', '-')
+        on_hit = move_data.get('onHit', '-')
+        on_block = move_data.get('onBlock', '-')
+        extra_info = move_data.get('extraInfo', '-').replace('[', '').replace(']', '').replace('"', '')
+        
+        block = (
+            f"**{move_data['moveName']} ({move_data['numCmd']})**\n"
+            f"Character: {move_data.get('char_name', 'Unknown')}\n" # Need to inject char name if not in row
+            f"Startup: {startup} // Active: {active} // Recovery: {recovery}\n"
+            f"Cancel: {cancel}\n"
+            f"Damage: {damage}\n"
+            f"Guard: {guard}\n"
+            f"On Hit: {on_hit} // On Block: {on_block}\n"
+            f"Notes: {extra_info}"
+        )
+        formatted_blocks.append(block)
+        
+    return "\n\n".join(formatted_blocks)
+
+
+def lookup_frame_data(character, move_input):
+    """Search for move data."""
+    if character.lower() not in FRAME_DATA:
+        return None
+    
+    data = FRAME_DATA[character.lower()]
+    move_input = move_input.lower().strip()
+    
+    # search priority: numCmd -> plnCmd -> moveName
+    for row in data:
+        # exact match numCmd (5MP)
+        if row.get('numCmd', '').lower() == move_input:
+            return row
+        # exact match plnCmd (MP)
+        if row.get('plnCmd', '').lower() == move_input:
+            return row
+        # fuzzy match moveName ("Stand MP")
+        if move_input in row.get('moveName', '').lower():
+            return row
+            
+    return None
+
+def format_frame_data(row):
+    """Format frame data row into a readable string."""
+    return (
+        f"Move: {row['moveName']} ({row['numCmd']})\n"
+        f"Startup: {row['startup']}f | Active: {row['active']}f | Recovery: {row['recovery']}f\n"
+        f"On Hit: {row['onHit']} | On Block: {row['onBlock']}\n"
+        f"Damage: {row['dmg']} | Attack Type: {row['atkLvl']}\n"
+        f"Notes: {row.get('extraInfo', '')}"
+    )
 
 def get_selected_figures_str(guild):
     figures_pool = ['Yimbo', 'zed', 'sainted', 'LL', 'Torino']
@@ -234,6 +412,8 @@ async def on_ready():
     client.loop.create_task(worker())
     # start web server
     client.loop.create_task(start_web_server())
+    # load frame data
+    load_frame_data()
 
 @client.event
 async def on_message(message):
@@ -308,12 +488,34 @@ async def on_message(message):
     check_media = False
     replied_context = None  # store bub's original message if replying to bot
     
+    
     # check mentions
     if client.user.mentioned_in(message):
         check_media = True
 
-    # check replies
-    if message.reference:
+    replied_context = None 
+    
+    # Only check for frame data if Bub is explicitly mentioned
+    if client.user.mentioned_in(message):
+        # Frame Data Integration (Advanced)
+        fd_context_data = find_moves_in_text(content_lower)
+        
+        if fd_context_data:
+            # Found relevant frame data! Inject it.
+            replied_context = (
+                f"USER QUERY: {message.content}\n"
+                f"AVAILABLE FRAME DATA:\n{fd_context_data}\n"
+                "INSTRUCTION: You must OUTPUT the full data block VERBATIM for EVERY move mentioned.\n"
+                "Even if the user asks for a comparison (tile 'who is faster?'), FIRST list the full stats for valid moves, THEN add a brief 1-sentence comparison.\n"
+                "Format: \n"
+                "**Move Name**\n"
+                "Startup: X // Active: Y ...\n"
+                "(Repeat for all moves)\n\n"
+                "Comparison: [Your 1 sentence comparison]"
+            )
+            should_respond = True
+
+    if replied_context is None and message.reference:
         try:
             if message.reference.cached_message:
                 replied_msg = message.reference.cached_message
