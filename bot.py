@@ -56,6 +56,8 @@ SYSTEM_PROMPT = (
     "Answer the user's question DIRECTLY first. "
     "No Tangents. Stay on topic. Keep responses concise and relevant."
     "NEVER output your internal thought process. Do not use parentheses for meta-commentary."
+    "When discussing Street Fighter 6 frame data, ONLY use the data provided in 'AVAILABLE DATA' sections. Do not invent or guess frame data values."
+    "When discussing broader street fighter topics, use the data provided in 'AVAILABLE DATA' sections. Do not invent or guess frame data values."
 )
 
 MOVE_DEFINITIONS = (
@@ -77,6 +79,8 @@ IMPROVEMENT_PROMPT = (
     "Be supportive but also playfully demand more from them. "
     "Never break character. "
     "NEVER output your internal thought process."
+    "When discussing Street Fighter 6 frame data, ONLY use the data provided in 'AVAILABLE DATA' sections. Do not invent or guess frame data values."
+    "When discussing broader street fighter topics, use the data provided in 'AVAILABLE DATA' sections. Do not invent or guess frame data values."
 )
 
 
@@ -374,12 +378,12 @@ def lookup_frame_data(character, move_input):
         "fmp": "4 or 6mp",
         "bmp": "4 or 6mp",
         # Zangief SPD variations
-        "360": "screw pile driver",
-        "spd": "screw pile driver",
-        "360p": "screw pile driver",
-        "360lp": "screw pile driver",
-        "360mp": "screw pile driver",
-        "360hp": "screw pile driver",
+        "360": "screw piledriver",
+        "spd": "screw piledriver",
+        "360p": "screw piledriver",
+        "360lp": "screw piledriver",
+        "360mp": "screw piledriver",
+        "360hp": "screw piledriver",
         # Add more aliases as needed
     }
     
