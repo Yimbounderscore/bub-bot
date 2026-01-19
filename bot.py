@@ -97,7 +97,10 @@ async def get_openrouter_response(messages):
         "messages": messages,
         "max_tokens": 1024,
         "temperature": 1.0,
-        "top_p": 1.0
+        "top_p": 1.0,
+        "reasoning": {
+            "effort": "medium"
+        }
     }
     
     async with aiohttp.ClientSession() as session:
@@ -341,6 +344,12 @@ def find_moves_in_text(text):
             f"Notes: {extra_info}"
         )
         formatted_blocks.append(block)
+    
+    # Check for punish calculation
+    punish_verdict = check_punish(text_lower, results)
+    if punish_verdict:
+        # Prepend punish verdict to the output
+        return punish_verdict + "\n\n---\n\n" + "\n\n".join(formatted_blocks)
         
     return "\n\n".join(formatted_blocks)
 
@@ -353,6 +362,30 @@ def lookup_frame_data(character, move_input):
     
     data = FRAME_DATA[character.lower()]
     move_input = move_input.lower().strip()
+    
+    # Input Aliases - maps user input to canonical spreadsheet values
+    # Format: "user_input": "spreadsheet_value" (or list of possible matches)
+    INPUT_ALIASES = {
+        # Chun-Li forward MP variations
+        "4mp": "4 or 6mp",
+        "6mp": "4 or 6mp",
+        "f+mp": "4 or 6mp",
+        "b+mp": "4 or 6mp",
+        "fmp": "4 or 6mp",
+        "bmp": "4 or 6mp",
+        # Zangief SPD variations
+        "360": "screw pile driver",
+        "spd": "screw pile driver",
+        "360p": "screw pile driver",
+        "360lp": "screw pile driver",
+        "360mp": "screw pile driver",
+        "360hp": "screw pile driver",
+        # Add more aliases as needed
+    }
+    
+    # Check if input matches an alias
+    if move_input in INPUT_ALIASES:
+        move_input = INPUT_ALIASES[move_input]
     
     # search priority: numCmd -> plnCmd -> moveName
     for row in data:
@@ -367,6 +400,68 @@ def lookup_frame_data(character, move_input):
             return row
             
     return None
+
+def check_punish(text_lower, results):
+    """
+    Detects punish queries and calculates if Move B can punish Move A.
+    Returns a formatted punish verdict string, or None if not a punish query.
+    """
+    # Only trigger on punish-related queries
+    punish_keywords = ['punish', 'punishable', 'can i punish', 'is it punishable']
+    if not any(kw in text_lower for kw in punish_keywords):
+        return None
+    
+    # Need exactly 2 moves to compare
+    if len(results) < 2:
+        return None
+    
+    # Assume first move = blocked move (Move A), second = punish attempt (Move B)
+    move_a = results[0]
+    move_b = results[1]
+    
+    try:
+        # Extract on_block from Move A (e.g. "-8")
+        on_block_raw = str(move_a.get('onBlock', '0'))
+        # Handle edge cases like "KD", "+5", "-8"
+        on_block_clean = on_block_raw.replace('+', '').strip()
+        if on_block_clean.lstrip('-').isdigit():
+            on_block = int(on_block_clean)
+        else:
+            # Non-numeric (e.g. "KD") - can't calculate
+            return f"Cannot calculate punish: {move_a['moveName']} has non-numeric block advantage ({on_block_raw})."
+        
+        # Extract startup from Move B (e.g. "5")
+        startup_raw = str(move_b.get('startup', '0'))
+        # Handle multi-hit like "3+5" - use first number
+        startup_clean = startup_raw.split('+')[0].split('~')[0].split('(')[0].strip()
+        if startup_clean.isdigit():
+            startup = int(startup_clean)
+        else:
+            return f"Cannot calculate punish: {move_b['moveName']} has non-numeric startup ({startup_raw})."
+        
+        move_a_name = f"{move_a.get('char_name', 'Unknown')}'s {move_a['moveName']}"
+        move_b_name = f"{move_b.get('char_name', 'Unknown')}'s {move_b['moveName']}"
+        
+        # Punish logic: If on_block is negative and abs(on_block) >= startup, punishable
+        # e.g. -8 on block, 5f startup = punishable (-8 means 8 frames of disadvantage)
+        if on_block < 0 and abs(on_block) >= startup:
+            return (
+                f"**PUNISH CALCULATION**\n"
+                f"{move_a_name} is **{on_block}** on block.\n"
+                f"{move_b_name} has **{startup}f startup**.\n\n"
+                f"✅ **YES**, this is punishable numerically speaking, "
+                f"but my scrolls do not contain data on pushback so I cannot comment on range."
+            )
+        else:
+            return (
+                f"**PUNISH CALCULATION**\n"
+                f"{move_a_name} is **{on_block}** on block.\n"
+                f"{move_b_name} has **{startup}f startup**.\n\n"
+                f"❌ **NO**, {move_a_name} cannot be punished by {move_b_name}.\n"
+                f"{move_b_name} startup must be **≤{abs(on_block)}f** to punish, and the character must be in range."
+            )
+    except Exception as e:
+        return f"Punish calculation error: {e}"
 
 def format_frame_data(row):
     """Format frame data row into a readable string."""
