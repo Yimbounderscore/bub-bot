@@ -8,4 +8,18 @@ list_files.py
 temp_prompt.py
 *.ps1
 
+# Dev/Test Scripts
+check_sources.py
+extract_jp.py
+inspect_jp.py
+inspect_rows.py
+validate_all.py
+parse_bnbs.py
 
+# Data/Log Files
+*_source.txt
+problem_rows.txt
+validation_issues.txt
+*.csv
+*.tsv
+manon_framedata.csv

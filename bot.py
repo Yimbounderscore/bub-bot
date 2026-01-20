@@ -99,7 +99,7 @@ async def get_openrouter_response(messages):
     payload = {
         "model": OPENROUTER_MODEL,
         "messages": messages,
-        "max_tokens": 1024,
+        "max_tokens": 4096,
         "temperature": 1.0,
         "top_p": 1.0,
         "reasoning": {
@@ -134,10 +134,11 @@ async def get_openrouter_response(messages):
 # Frame Data Storage
 FRAME_DATA = {}
 FRAME_STATS = {}
+BNB_DATA = {}  # Character BNB/Combo data
 
 def load_frame_data():
     """Load frame data from ODS file for ALL characters."""
-    global FRAME_DATA, FRAME_STATS
+    global FRAME_DATA, FRAME_STATS, BNB_DATA
     filename = "FAT - SF6 Frame Data.ods"
     
     if os.path.exists(filename):
@@ -180,6 +181,51 @@ def load_frame_data():
             print(f"Total characters loaded: {len(FRAME_DATA)}")
             print(f"Total stats loaded: {len(FRAME_STATS)}")
             
+            # Load BNB/Combo data from CharacterBNBs sheet
+            if 'CharacterBNBs' in xls.sheet_names:
+                bnb_df = pd.read_excel(xls, sheet_name='CharacterBNBs')
+                # Aggregate all combos per character
+                for _, row in bnb_df.iterrows():
+                    char_name = str(row.get('characterName', '')).lower().strip()
+                    if not char_name:
+                        continue
+                    
+                    # Build combo string from available columns
+                    combo_name = str(row.get('NAME', '')).strip()
+                    starter = str(row.get('STARTER', '')).strip()
+                    route = str(row.get('ROUTE', '')).strip()
+                    damage = str(row.get('DAMAGE', '')).strip()
+                    conditions = str(row.get('CONDITIONS', '')).strip()
+                    notes = str(row.get('EXTRANOTES(description data)', '')).strip()
+                    
+                    # Skip empty rows
+                    if not combo_name or combo_name == 'nan':
+                        continue
+                    
+                    # Format combo entry
+                    combo_entry = f"**{combo_name}**"
+                    if starter and starter != 'nan':
+                        combo_entry += f"\n  Starter: {starter}"
+                    if route and route != 'nan':
+                        combo_entry += f"\n  Route: {route}"
+                    if damage and damage != 'nan':
+                        combo_entry += f"\n  Damage: {damage}"
+                    if conditions and conditions != 'nan':
+                        combo_entry += f"\n  Conditions: {conditions}"
+                    if notes and notes != 'nan':
+                        combo_entry += f"\n  Notes: {notes}"
+                    
+                    # Append to character's combo list
+                    if char_name not in BNB_DATA:
+                        BNB_DATA[char_name] = []
+                    BNB_DATA[char_name].append(combo_entry)
+                
+                # Convert lists to formatted strings
+                for char in BNB_DATA:
+                    BNB_DATA[char] = "\n\n".join(BNB_DATA[char])
+                
+                print(f"Total BNBs loaded: {len(BNB_DATA)} characters")
+            
         except Exception as e:
             print(f"Error loading {filename}: {e}")
     else:
@@ -195,6 +241,15 @@ def find_moves_in_text(text):
     for char in FRAME_DATA.keys():
         if char in text_lower:
             mentioned_chars.append(char)
+    
+    # Check for BNB/Combo requests
+    bnb_keywords = ['combo', 'combos', 'bnb', 'bnbs', 'bread and butter', 'route', 'routes']
+    wants_bnb = any(kw in text_lower for kw in bnb_keywords)
+    bnb_context = ""
+    if wants_bnb:
+        for char in mentioned_chars:
+            if char in BNB_DATA:
+                bnb_context += f"\n\n**{char.capitalize()} BNBs/Combos:**\n{BNB_DATA[char]}"
             
     # 2. Heuristic: For each mentioned character, search for moves mentioned nearby?
     # Simpler approach: Check if any move inputs are present in the text
@@ -353,9 +408,13 @@ def find_moves_in_text(text):
     punish_verdict = check_punish(text_lower, results)
     if punish_verdict:
         # Prepend punish verdict to the output
-        return punish_verdict + "\n\n---\n\n" + "\n\n".join(formatted_blocks)
-        
-    return "\n\n".join(formatted_blocks)
+        return punish_verdict + "\n\n---\n\n" + "\n\n".join(formatted_blocks) + bnb_context
+    
+    # Combine frame data blocks with BNB context
+    output = "\n\n".join(formatted_blocks)
+    if bnb_context:
+        output += "\n\n---\n" + bnb_context
+    return output
 
 
 def lookup_frame_data(character, move_input):
