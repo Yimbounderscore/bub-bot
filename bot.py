@@ -134,7 +134,8 @@ async def get_openrouter_response(messages):
 # Frame Data Storage
 FRAME_DATA = {}
 FRAME_STATS = {}
-BNB_DATA = {}  # Character BNB/Combo data
+BNB_DATA = {}  # Character combo data from per-character sheets
+OKI_DATA = {}
 
 # Character name aliases (shorthand -> canonical name)
 CHARACTER_ALIASES = {
@@ -146,9 +147,33 @@ CHARACTER_ALIASES = {
     "honda": "e.honda",
 }
 
+
+def normalize_char_name(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(name).lower())
+
+
+def format_sheet_text(df: pd.DataFrame) -> str:
+    df = df.fillna("")
+    lines = []
+    for _, row in df.iterrows():
+        values = []
+        for val in row.tolist():
+            text = str(val).strip()
+            if text.lower() == "nan":
+                text = ""
+            values.append(text)
+        while values and values[0] == "":
+            values.pop(0)
+        while values and values[-1] == "":
+            values.pop()
+        if not values:
+            continue
+        lines.append(" | ".join(values))
+    return "\n".join(lines)
+
 def load_frame_data():
     """Load frame data from ODS file for ALL characters."""
-    global FRAME_DATA, FRAME_STATS, BNB_DATA
+    global FRAME_DATA, FRAME_STATS, BNB_DATA, OKI_DATA
     filename = "FAT - SF6 Frame Data.ods"
     
     if os.path.exists(filename):
@@ -191,50 +216,46 @@ def load_frame_data():
             print(f"Total characters loaded: {len(FRAME_DATA)}")
             print(f"Total stats loaded: {len(FRAME_STATS)}")
             
-            # Load BNB/Combo data from CharacterBNBs sheet
-            if 'CharacterBNBs' in xls.sheet_names:
-                bnb_df = pd.read_excel(xls, sheet_name='CharacterBNBs')
-                # Aggregate all combos per character
-                for _, row in bnb_df.iterrows():
-                    char_name = str(row.get('characterName', '')).lower().strip()
-                    if not char_name:
-                        continue
-                    
-                    # Build combo string from available columns
-                    combo_name = str(row.get('NAME', '')).strip()
-                    starter = str(row.get('STARTER', '')).strip()
-                    route = str(row.get('ROUTE', '')).strip()
-                    damage = str(row.get('DAMAGE', '')).strip()
-                    conditions = str(row.get('CONDITIONS', '')).strip()
-                    notes = str(row.get('EXTRANOTES(description data)', '')).strip()
-                    
-                    # Skip empty rows
-                    if not combo_name or combo_name == 'nan':
-                        continue
-                    
-                    # Format combo entry
-                    combo_entry = f"**{combo_name}**"
-                    if starter and starter != 'nan':
-                        combo_entry += f"\n  Starter: {starter}"
-                    if route and route != 'nan':
-                        combo_entry += f"\n  Route: {route}"
-                    if damage and damage != 'nan':
-                        combo_entry += f"\n  Damage: {damage}"
-                    if conditions and conditions != 'nan':
-                        combo_entry += f"\n  Conditions: {conditions}"
-                    if notes and notes != 'nan':
-                        combo_entry += f"\n  Notes: {notes}"
-                    
-                    # Append to character's combo list
-                    if char_name not in BNB_DATA:
-                        BNB_DATA[char_name] = []
-                    BNB_DATA[char_name].append(combo_entry)
-                
-                # Convert lists to formatted strings
-                for char in BNB_DATA:
-                    BNB_DATA[char] = "\n\n".join(BNB_DATA[char])
-                
-                print(f"Total BNBs loaded: {len(BNB_DATA)} characters")
+            BNB_DATA = {}
+            OKI_DATA = {}
+            normalized_chars = {
+                normalize_char_name(name): name
+                for name in FRAME_DATA.keys()
+            }
+
+            combo_sheets = [
+                name for name in xls.sheet_names
+                if name.lower().endswith(" combos")
+            ]
+            oki_sheets = [
+                name for name in xls.sheet_names
+                if name.lower().endswith(" okisetups")
+                or name.lower().endswith(" setupsoki")
+            ]
+
+            for sheet_name in combo_sheets:
+                char_label = sheet_name[:-len(" combos")]
+                char_key = normalized_chars.get(normalize_char_name(char_label))
+                if not char_key:
+                    continue
+                df = pd.read_excel(xls, sheet_name=sheet_name, header=None, dtype=str)
+                combo_text = format_sheet_text(df)
+                if combo_text:
+                    BNB_DATA[char_key] = combo_text
+
+            for sheet_name in oki_sheets:
+                suffix = " okisetups" if sheet_name.lower().endswith(" okisetups") else " setupsoki"
+                char_label = sheet_name[:-len(suffix)]
+                char_key = normalized_chars.get(normalize_char_name(char_label))
+                if not char_key:
+                    continue
+                df = pd.read_excel(xls, sheet_name=sheet_name, header=None, dtype=str)
+                oki_text = format_sheet_text(df)
+                if oki_text:
+                    OKI_DATA[char_key] = oki_text
+
+            print(f"Total combo sheets loaded: {len(BNB_DATA)} characters")
+            print(f"Total oki sheets loaded: {len(OKI_DATA)} characters")
             
         except Exception as e:
             print(f"Error loading {filename}: {e}")
@@ -261,13 +282,17 @@ def find_moves_in_text(text):
             mentioned_chars.append(char)
     
     # Check for BNB/Combo requests
-    bnb_keywords = ['combo', 'combos', 'bnb', 'bnbs', 'bread and butter', 'route', 'routes']
+    bnb_keywords = ["combo", "combos", "bnb", "bnbs", "bread and butter", "route", "routes"]
+    oki_keywords = ["oki", "okizeme", "setup", "setups", "meaty", "meaties"]
     wants_bnb = any(kw in text_lower for kw in bnb_keywords)
+    wants_oki = any(kw in text_lower for kw in oki_keywords)
     bnb_context = ""
-    if wants_bnb:
+    if wants_bnb or wants_oki:
         for char in mentioned_chars:
-            if char in BNB_DATA:
-                bnb_context += f"\n\n**{char.capitalize()} BNBs/Combos:**\n{BNB_DATA[char]}"
+            if wants_bnb and char in BNB_DATA:
+                bnb_context += f"\n\n**{char.capitalize()} Combos:**\n{BNB_DATA[char]}"
+            if (wants_bnb or wants_oki) and char in OKI_DATA:
+                bnb_context += f"\n\n**{char.capitalize()} Oki/Setups:**\n{OKI_DATA[char]}"
             
     # 2. Heuristic: For each mentioned character, search for moves mentioned nearby?
     # Simpler approach: Check if any move inputs are present in the text
