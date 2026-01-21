@@ -612,9 +612,37 @@ def check_punish(text_lower, results):
     if not any(kw in text_lower for kw in punish_keywords):
         return None
     
-    # Need exactly 2 moves to compare
+    # If only one move is identified, provide basic safety guidance
     if len(results) < 2:
-        return None
+        move_a = results[0] if results else None
+        if not move_a:
+            return None
+        try:
+            on_block_raw = str(move_a.get("onBlock", "0"))
+            on_block_clean = on_block_raw.replace("+", "").strip()
+            if not on_block_clean.lstrip("-").isdigit():
+                return (
+                    f"Cannot calculate punish: {move_a['moveName']} has non-numeric block advantage "
+                    f"({on_block_raw})."
+                )
+            on_block = int(on_block_clean)
+        except Exception as e:
+            return f"Punish calculation error: {e}"
+
+        move_a_name = f"{move_a.get('char_name', 'Unknown')}'s {move_a['moveName']}"
+        frame_advantage = max(-on_block, 0)
+        if on_block >= -3:
+            return (
+                f"**PUNISH CALCULATION**\n"
+                f"{move_a_name} is **{on_block}** on block.\n\n"
+                f"NO: This is **safe on block**. Moves that are -3 or better cannot be "
+                f"punished by normal attacks."
+            )
+        return (
+            f"**PUNISH CALCULATION**\n"
+            f"{move_a_name} is **{on_block}** on block.\n\n"
+            f"This is punishable **if** your move's startup is **≤{frame_advantage}f** and you're in range."
+        )
     
     # Assume first move = blocked move (Move A), second = punish attempt (Move B)
     move_a = results[0]
@@ -643,14 +671,16 @@ def check_punish(text_lower, results):
         move_a_name = f"{move_a.get('char_name', 'Unknown')}'s {move_a['moveName']}"
         move_b_name = f"{move_b.get('char_name', 'Unknown')}'s {move_b['moveName']}"
         
-        # Punish logic: If on_block is negative and abs(on_block) >= startup, punishable
-        # e.g. -8 on block, 5f startup = punishable (-8 means 8 frames of disadvantage)
-        if on_block < 0 and abs(on_block) >= startup:
+        # Punish logic: defender frame advantage = -on_block (when negative)
+        # If startup <= frame advantage, punishable (range still matters).
+        frame_advantage = max(-on_block, 0)
+        is_punishable = on_block <= -4 and frame_advantage >= startup
+        if is_punishable:
             return (
                 f"**PUNISH CALCULATION**\n"
                 f"{move_a_name} is **{on_block}** on block.\n"
                 f"{move_b_name} has **{startup}f startup**.\n\n"
-                f"✅ **YES**, this is punishable numerically speaking, "
+                f"YES: This is punishable numerically speaking, "
                 f"but my scrolls do not contain data on pushback so I cannot comment on range."
             )
         else:
@@ -658,8 +688,8 @@ def check_punish(text_lower, results):
                 f"**PUNISH CALCULATION**\n"
                 f"{move_a_name} is **{on_block}** on block.\n"
                 f"{move_b_name} has **{startup}f startup**.\n\n"
-                f"❌ **NO**, {move_a_name} cannot be punished by {move_b_name}.\n"
-                f"{move_b_name} startup must be **≤{abs(on_block)}f** to punish, and the character must be in range."
+                f"NO: {move_a_name} cannot be punished by {move_b_name}.\n"
+                f"{move_b_name} startup must be **≤{frame_advantage}f** to punish, and the character must be in range."
             )
     except Exception as e:
         return f"Punish calculation error: {e}"
