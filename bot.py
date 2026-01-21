@@ -136,6 +136,16 @@ FRAME_DATA = {}
 FRAME_STATS = {}
 BNB_DATA = {}  # Character BNB/Combo data
 
+# Character name aliases (shorthand -> canonical name)
+CHARACTER_ALIASES = {
+    "kim": "kimberly",
+    "gief": "zangief",
+    "sim": "dhalsim",
+    "chun": "chun-li",
+    "dj": "deejay",
+    "honda": "e.honda",
+}
+
 def load_frame_data():
     """Load frame data from ODS file for ALL characters."""
     global FRAME_DATA, FRAME_STATS, BNB_DATA
@@ -238,8 +248,16 @@ def find_moves_in_text(text):
     
     # 1. Identify which characters are mentioned
     mentioned_chars = []
+    
+    # First check for character aliases and normalize them
+    for alias, canonical in CHARACTER_ALIASES.items():
+        if alias in text_lower:
+            if canonical in FRAME_DATA and canonical not in mentioned_chars:
+                mentioned_chars.append(canonical)
+    
+    # Then check for direct character name matches
     for char in FRAME_DATA.keys():
-        if char in text_lower:
+        if char in text_lower and char not in mentioned_chars:
             mentioned_chars.append(char)
     
     # Check for BNB/Combo requests
@@ -300,6 +318,59 @@ def find_moves_in_text(text):
         if f"{char} lk" in text_lower:
              row = lookup_frame_data(char, "lk")
              if row and row not in results: results.append(row)
+        
+        # SPD/360 variations - works for Zangief (Screw Piledriver) and Lily (Mexican Typhoon)
+        spd_patterns = [
+            ("l spd", "lp"), ("m spd", "mp"), ("h spd", "hp"),
+            ("light spd", "lp"), ("medium spd", "mp"), ("heavy spd", "hp"),
+            ("lspd", "lp"), ("mspd", "mp"), ("hspd", "hp"),
+            ("od spd", "od"), ("ex spd", "od"),
+            ("360+lp", "lp"), ("360+mp", "mp"), ("360+hp", "hp"), ("360+pp", "od"),
+            ("360lp", "lp"), ("360mp", "mp"), ("360hp", "hp"), ("360pp", "od"),
+            ("spd", ""), ("360", ""),
+        ]
+        for pattern, strength in spd_patterns:
+            if pattern in text_lower:
+                # Try both Screw Piledriver (Gief) and Mexican Typhoon (Lily)
+                if strength:
+                    move_names = [f"{strength} screw piledriver", f"{strength} mexican typhoon"]
+                else:
+                    move_names = ["screw piledriver", "mexican typhoon"]
+                for move_name in move_names:
+                    row = lookup_frame_data(char, move_name)
+                    if row and row not in results:
+                        results.append(row)
+                        break
+                break  # Only match one SPD variant
+        
+        # Chun-Li stance/serenity stream and followups
+        stance_patterns = [
+            ("stance lp", "stance lp"), ("stance mp", "stance mp"), ("stance hp", "stance hp"),
+            ("stance lk", "stance lk"), ("stance mk", "stance mk"), ("stance hk", "stance hk"),
+            ("ss lp", "ss lp"), ("ss mp", "ss mp"), ("ss hp", "ss hp"),
+            ("ss lk", "ss lk"), ("ss mk", "ss mk"), ("ss hk", "ss hk"),
+            ("serenity stream", "stance"), ("stance", "stance"), ("ss", "ss"),
+        ]
+        for pattern, alias_key in stance_patterns:
+            if pattern in text_lower:
+                row = lookup_frame_data(char, alias_key)
+                if row and row not in results:
+                    results.append(row)
+                break  # Only match one stance variant
+        
+        # Lily Mexican Typhoon variations
+        typhoon_patterns = [
+            ("l typhoon", "l typhoon"), ("m typhoon", "m typhoon"), ("h typhoon", "h typhoon"),
+            ("light typhoon", "light typhoon"), ("medium typhoon", "medium typhoon"), ("heavy typhoon", "heavy typhoon"),
+            ("od typhoon", "od typhoon"), ("ex typhoon", "ex typhoon"),
+            ("mexican typhoon", "mexican typhoon"), ("typhoon", "typhoon"),
+        ]
+        for pattern, alias_key in typhoon_patterns:
+            if pattern in text_lower:
+                row = lookup_frame_data(char, alias_key)
+                if row and row not in results:
+                    results.append(row)
+                break  # Only match one typhoon variant
 
     # Format the results
     formatted_blocks = []
@@ -440,9 +511,51 @@ def lookup_frame_data(character, move_input):
         "360": "screw piledriver",
         "spd": "screw piledriver",
         "360p": "screw piledriver",
-        "360lp": "screw piledriver",
-        "360mp": "screw piledriver",
-        "360hp": "screw piledriver",
+        "360+lp": "lp screw piledriver",
+        "360+mp": "mp screw piledriver",
+        "360+hp": "hp screw piledriver",
+        "360+pp": "od screw piledriver",
+        "360lp": "lp screw piledriver",
+        "360mp": "mp screw piledriver",
+        "360hp": "hp screw piledriver",
+        "360pp": "od screw piledriver",
+        "l spd": "lp screw piledriver",
+        "m spd": "mp screw piledriver",
+        "h spd": "hp screw piledriver",
+        "od spd": "od screw piledriver",
+        "ex spd": "od screw piledriver",
+        "lspd": "lp screw piledriver",
+        "mspd": "mp screw piledriver",
+        "hspd": "hp screw piledriver",
+        "light spd": "lp screw piledriver",
+        "medium spd": "mp screw piledriver",
+        "heavy spd": "hp screw piledriver",
+        # Chun-Li Serenity Stream (stance) and followups
+        "stance": "serenity stream",
+        "ss": "serenity stream",
+        "stance lp": "orchid palm",
+        "stance mp": "snake strike",
+        "stance hp": "lotus fist",
+        "stance lk": "forward strike",
+        "stance mk": "senpu kick",
+        "stance hk": "tenku kick",
+        "ss lp": "orchid palm",
+        "ss mp": "snake strike",
+        "ss hp": "lotus fist",
+        "ss lk": "forward strike",
+        "ss mk": "senpu kick",
+        "ss hk": "tenku kick",
+        # Lily Mexican Typhoon variations
+        "typhoon": "mexican typhoon",
+        "mexican typhoon": "mexican typhoon",
+        "l typhoon": "lp mexican typhoon",
+        "m typhoon": "mp mexican typhoon",
+        "h typhoon": "hp mexican typhoon",
+        "od typhoon": "od mexican typhoon",
+        "ex typhoon": "od mexican typhoon",
+        "light typhoon": "lp mexican typhoon",
+        "medium typhoon": "mp mexican typhoon",
+        "heavy typhoon": "hp mexican typhoon",
         # Add more aliases as needed
     }
     

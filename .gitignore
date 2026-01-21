@@ -23,3 +23,14 @@ validation_issues.txt
 *.csv
 *.tsv
 manon_framedata.csv
+AGENTS.md
+bot_from_server.py
+check_chun.py
+check_lily.py
+check_spd.py
+Copy of SF6 Simple Character Guides.ods
+FAT - SF6 Frame Data.ods.bak
+implementation_plan.md
+INIT_PROMPT.md
+nul
+task.md
