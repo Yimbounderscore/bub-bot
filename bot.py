@@ -143,7 +143,8 @@ CHARACTER_ALIASES = {
     "gief": "zangief",
     "sim": "dhalsim",
     "chun": "chun-li",
-    "dj": "deejay",
+    "dj": "dee jay",
+    "deejay": "dee jay",
     "honda": "e.honda",
 }
 
