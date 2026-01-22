@@ -10,7 +10,6 @@ import pandas as pd
 from dotenv import load_dotenv
 from aiohttp import web
 
-# load env vars
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 try:
@@ -19,7 +18,6 @@ except (TypeError, ValueError):
     print("Error: CHANNEL_ID not found or invalid in .env")
     CHANNEL_ID = None
 
-# OpenRouter config
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
 OPENROUTER_MODEL = os.getenv('OPENROUTER_MODEL', 'xiaomi/mimo-v2-flash:free')
 OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1'
@@ -30,7 +28,6 @@ if OPENROUTER_ENABLED:
 else:
     print("OpenRouter API key missing. Chat feature disabled.")
 
-# intent setup
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
@@ -120,25 +117,19 @@ async def get_openrouter_response(messages):
             data = await response.json()
             content = data['choices'][0]['message']['content']
             
-            # Clean up "thought process" leaks
-            # 1. Remove <think> tags if model produces them
             content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
-            # 2. Remove parenthetical meta-commentary at start of string (common leak)
-            # e.g. "(User asked about X, so I will says Y)"
             content = re.sub(r'^\s*\(.*?\)\s*', '', content, flags=re.DOTALL)
             
             return content.strip()
 
 
 
-# Frame Data Storage
 FRAME_DATA = {}
 FRAME_STATS = {}
-BNB_DATA = {}  # Character combo data from per-character sheets
+BNB_DATA = {}
 OKI_DATA = {}
 CHARACTER_INFO = {}
 
-# Character name aliases (shorthand -> canonical name)
 CHARACTER_ALIASES = {
     "kim": "kimberly",
     "gief": "zangief",
@@ -151,10 +142,12 @@ CHARACTER_ALIASES = {
 
 
 def normalize_char_name(name: str) -> str:
+    """Normalize character name to lowercase alphanumeric."""
     return re.sub(r"[^a-z0-9]", "", str(name).lower())
 
 
 def format_sheet_text(df: pd.DataFrame) -> str:
+    """Convert DataFrame rows to pipe-separated text lines."""
     df = df.fillna("")
     lines = []
     for _, row in df.iterrows():
@@ -174,7 +167,7 @@ def format_sheet_text(df: pd.DataFrame) -> str:
     return "\n".join(lines)
 
 def load_frame_data():
-    """Load frame data from ODS file for ALL characters."""
+    """Load frame data, stats, combos, oki, and character info from ODS."""
     global FRAME_DATA, FRAME_STATS, BNB_DATA, OKI_DATA, CHARACTER_INFO
     filename = "FAT - SF6 Frame Data.ods"
     
@@ -207,10 +200,7 @@ def load_frame_data():
                 elif sheet_name.endswith("Stats") and not sheet_name.startswith("_OLD"):
                     char_name = sheet_name.replace("Stats", "").lower()
                     df = pd.read_excel(xls, sheet_name=sheet_name)
-                    # Stats usually have 'name' and 'stat' columns. Convert to dict.
-                    # Assuming format: row 0=health, row 2=bestReversal, etc.
-                    # We'll just dump it as a list of dicts or a key-value dict if possible.
-                    # Based on inspection: columns are 'name', 'stat'.
+                
                     stats_dict = dict(zip(df['name'], df['stat']))
                     FRAME_STATS[char_name] = stats_dict
                     # print(f"Loaded stats for {char_name}")
@@ -284,7 +274,7 @@ def load_frame_data():
         print(f"File not found: {filename}")
 
 def find_moves_in_text(text):
-    """Find character+move pairs in text and return formatted data chunks."""
+    """Extract character/move mentions and return context payload with mode."""
     found_data = []
     text_lower = text.lower()
     
@@ -358,12 +348,7 @@ def find_moves_in_text(text):
         # Simpler approach: Check if any move inputs are present in the text
         # that map to these characters.
 
-        # We will try to match "[char] [input]" or just "[input]" if we can infer char.
-        # For now, let's iterate known moves for the mentioned characters to see if they are in the string.
-        # This might be slow if move lists are huge, but safer.
-
-        # Optimization: Extract potential move-like tokens (e.g. 5MK, 2HP, Stand LP)
-        # Regex for common inputs: numeric (5MK), or textual (Stand MK)
+    
         move_regex = r"\b([1-9][0-9]*[a-zA-Z]+|stand\s+[a-zA-Z]+|crouch\s+[a-zA-Z]+|jump\s+[a-zA-Z]+|[a-zA-Z]+\s+kick|[a-zA-Z]+\s+punch)\b"
         potential_inputs = re.findall(move_regex, text_lower)
         extra_inputs = []
@@ -374,6 +359,50 @@ def find_moves_in_text(text):
             extra_inputs.append("sway")
         if "jus cool" in text_lower or "juscool" in text_lower:
             extra_inputs.append("jus cool")
+        charge_patterns = [
+            (r"\b46p\b", "46p"),
+            (r"\b46lp\b", "46lp"),
+            (r"\b46mp\b", "46mp"),
+            (r"\b46hp\b", "46hp"),
+            (r"\b46pp\b", "46pp"),
+            (r"\bb,\s*f\+?p\b", "46p"),
+            (r"\bb,\s*f\+?lp\b", "46lp"),
+            (r"\bb,\s*f\+?mp\b", "46mp"),
+            (r"\bb,\s*f\+?hp\b", "46hp"),
+            (r"\bb,\s*f\+?pp\b", "46pp"),
+            (r"\bbf\+?p\b", "46p"),
+            (r"\bbf\+?lp\b", "46lp"),
+            (r"\bbf\+?mp\b", "46mp"),
+            (r"\bbf\+?hp\b", "46hp"),
+            (r"\bbf\+?pp\b", "46pp"),
+            (r"\bback\s*forward\+?p\b", "46p"),
+            (r"\bback\s*forward\+?lp\b", "46lp"),
+            (r"\bback\s*forward\+?mp\b", "46mp"),
+            (r"\bback\s*forward\+?hp\b", "46hp"),
+            (r"\bback\s*forward\+?pp\b", "46pp"),
+        ]
+        for pattern, token in charge_patterns:
+            if re.search(pattern, text_lower) and token not in extra_inputs:
+                extra_inputs.append(token)
+        keyword_inputs = [
+            "air slasher",
+            "sonic boom",
+            "sumo headbutt",
+            "psycho crusher",
+            "rolling attack",
+            "blanka ball",
+            "bison crusher",
+            "crusher",
+            "fireball",
+            "boom",
+            "headbutt",
+            "ball",
+        ]
+        for token in keyword_inputs:
+            if re.search(rf"\b{re.escape(token)}\b", text_lower) and token not in extra_inputs:
+                if token == "ball" and "blanka" not in text_lower:
+                    continue
+                extra_inputs.append(token)
         potential_inputs.extend(extra_inputs)
 
         # also valid simple inputs: "mp", "hk" if preceded by char?
@@ -417,7 +446,7 @@ def find_moves_in_text(text):
                 if row and row not in results:
                     results.append(row)
 
-            # SPD/360 variations - works for Zangief (Screw Piledriver) and Lily (Mexican Typhoon)
+            # SPD/360 variations - for Zangief (Screw Piledriver) and Lily (Mexican Typhoon)
             spd_patterns = [
                 ("l spd", "lp"), ("m spd", "mp"), ("h spd", "hp"),
                 ("light spd", "lp"), ("medium spd", "mp"), ("heavy spd", "hp"),
@@ -621,25 +650,24 @@ def find_moves_in_text(text):
 
 
 def lookup_frame_data(character, move_input):
-    """Search for move data."""
+    """Search for a move in character's frame data by numCmd, plnCmd, or moveName."""
     move_input = str(move_input)
-    if character.lower() not in FRAME_DATA:
+    char_key = character.lower()
+    if char_key not in FRAME_DATA:
         return None
     
-    data = FRAME_DATA[character.lower()]
+    data = FRAME_DATA[char_key]
     move_input = move_input.lower().strip()
     
-    # Input Aliases - maps user input to canonical spreadsheet values
-    # Format: "user_input": "spreadsheet_value" (or list of possible matches)
     INPUT_ALIASES = {
-        # Chun-Li forward MP variations
+        # Chun-Li
         "4mp": "4 or 6mp",
         "6mp": "4 or 6mp",
         "f+mp": "4 or 6mp",
         "b+mp": "4 or 6mp",
         "fmp": "4 or 6mp",
         "bmp": "4 or 6mp",
-        # DP / SRK variations
+        # DP/SRK
         "dp": "623",
         "srk": "623",
         "shoryu": "623",
@@ -648,7 +676,7 @@ def lookup_frame_data(character, move_input):
         "juggling sway": "juggling sway",
         "jus cool": "jus cool",
         "juscool": "jus cool",
-        # Zangief SPD variations
+        # Zangief SPD
         "360": "screw piledriver",
         "spd": "screw piledriver",
         "360p": "screw piledriver",
@@ -671,7 +699,7 @@ def lookup_frame_data(character, move_input):
         "light spd": "lp screw piledriver",
         "medium spd": "mp screw piledriver",
         "heavy spd": "hp screw piledriver",
-        # Chun-Li Serenity Stream (stance) and followups
+        # Chun-Li Serenity Stream
         "stance": "serenity stream",
         "ss": "serenity stream",
         "stance lp": "orchid palm",
@@ -686,7 +714,7 @@ def lookup_frame_data(character, move_input):
         "ss lk": "forward strike",
         "ss mk": "senpu kick",
         "ss hk": "tenku kick",
-        # Lily Mexican Typhoon variations
+        # Lily Mexican Typhoon
         "typhoon": "mexican typhoon",
         "mexican typhoon": "mexican typhoon",
         "l typhoon": "lp mexican typhoon",
@@ -697,12 +725,46 @@ def lookup_frame_data(character, move_input):
         "light typhoon": "lp mexican typhoon",
         "medium typhoon": "mp mexican typhoon",
         "heavy typhoon": "hp mexican typhoon",
-        # Add more aliases as needed
+    }
+
+    CHARACTER_INPUT_ALIASES = {
+        "dee jay": {
+            "46p": "air slasher",
+            "air slasher": "air slasher",
+            "slasher": "air slasher",
+            "fireball": "air slasher",
+        },
+        "guile": {
+            "46p": "sonic boom",
+            "sonic boom": "sonic boom",
+            "boom": "sonic boom",
+            "fireball": "sonic boom",
+        },
+        "e.honda": {
+            "46p": "sumo headbutt",
+            "sumo headbutt": "sumo headbutt",
+            "headbutt": "sumo headbutt",
+        },
+        "m.bison": {
+            "46p": "psycho crusher",
+            "psycho crusher": "psycho crusher",
+            "bison crusher": "psycho crusher",
+            "crusher": "psycho crusher",
+        },
+        "blanka": {
+            "46p": "rolling attack",
+            "rolling attack": "rolling attack",
+            "blanka ball": "rolling attack",
+            "ball": "rolling attack",
+        },
     }
     
     # Check if input matches an alias
     if move_input in INPUT_ALIASES:
         move_input = INPUT_ALIASES[move_input]
+    char_aliases = CHARACTER_INPUT_ALIASES.get(char_key, {})
+    if move_input in char_aliases:
+        move_input = char_aliases[move_input]
     
     # search priority: numCmd -> plnCmd -> moveName
     for row in data:
@@ -724,10 +786,7 @@ def lookup_frame_data(character, move_input):
     return None
 
 def check_punish(text_lower, results):
-    """
-    Detects punish queries and calculates if Move B can punish Move A.
-    Returns a formatted punish verdict string, or None if not a punish query.
-    """
+    """Calculate if Move B can punish Move A based on frame advantage."""
     # Only trigger on punish-related queries
     punish_keywords = ['punish', 'punishable', 'can i punish', 'is it punishable']
     if not any(kw in text_lower for kw in punish_keywords):
@@ -816,7 +875,7 @@ def check_punish(text_lower, results):
         return f"Punish calculation error: {e}"
 
 def format_frame_data(row):
-    """Format frame data row into a readable string."""
+    """Format a frame data row into readable text."""
     return (
         f"Move: {row['moveName']} ({row['numCmd']})\n"
         f"Startup: {row['startup']}f | Active: {row['active']}f | Recovery: {row['recovery']}f\n"
@@ -826,6 +885,7 @@ def format_frame_data(row):
     )
 
 def get_selected_figures_str(guild):
+    """Pick a random figure from the BUENAVISTA role members."""
     figures_pool = ['Yimbo', 'zed', 'sainted', 'LL', 'Torino']
     if guild:
         role = discord.utils.get(guild.roles, name="BUENAVISTA")
@@ -848,7 +908,7 @@ def get_selected_figures_str(guild):
     return selected_figures[0] if selected_figures else ""
 
 async def send_daily_messages(channel):
-    """sends daily messages"""
+    """Send scheduled daily messages to the channel."""
     print("Dispatching messages...")
     messages = [
         "Hello everyone",
