@@ -366,6 +366,15 @@ def find_moves_in_text(text):
         # Regex for common inputs: numeric (5MK), or textual (Stand MK)
         move_regex = r"\b([1-9][0-9]*[a-zA-Z]+|stand\s+[a-zA-Z]+|crouch\s+[a-zA-Z]+|jump\s+[a-zA-Z]+|[a-zA-Z]+\s+kick|[a-zA-Z]+\s+punch)\b"
         potential_inputs = re.findall(move_regex, text_lower)
+        extra_inputs = []
+        for token in ["dp", "srk", "shoryu", "shoryuken", "623"]:
+            if re.search(rf"\b{re.escape(token)}\b", text_lower):
+                extra_inputs.append(token)
+        if "sway" in text_lower:
+            extra_inputs.append("sway")
+        if "jus cool" in text_lower or "juscool" in text_lower:
+            extra_inputs.append("jus cool")
+        potential_inputs.extend(extra_inputs)
 
         # also valid simple inputs: "mp", "hk" if preceded by char?
 
@@ -589,10 +598,26 @@ def find_moves_in_text(text):
     punish_verdict = check_punish(text_lower, results)
     if punish_verdict:
         if output:
-            return punish_verdict + "\n\n---\n\n" + output
-        return punish_verdict
+            output = punish_verdict + "\n\n---\n\n" + output
+        else:
+            output = punish_verdict
 
-    return output
+    has_frame_blocks = bool(formatted_blocks)
+    has_combo_blocks = bool(bnb_context)
+    has_overview_blocks = bool(info_blocks)
+    if has_frame_blocks:
+        mode = "frame"
+    elif has_combo_blocks:
+        mode = "combo"
+    elif has_overview_blocks:
+        mode = "overview"
+    else:
+        mode = "none"
+
+    return {
+        "data": output,
+        "mode": mode,
+    }
 
 
 def lookup_frame_data(character, move_input):
@@ -614,6 +639,15 @@ def lookup_frame_data(character, move_input):
         "b+mp": "4 or 6mp",
         "fmp": "4 or 6mp",
         "bmp": "4 or 6mp",
+        # DP / SRK variations
+        "dp": "623",
+        "srk": "623",
+        "shoryu": "623",
+        "shoryuken": "623",
+        "sway": "juggling sway",
+        "juggling sway": "juggling sway",
+        "jus cool": "jus cool",
+        "juscool": "jus cool",
         # Zangief SPD variations
         "360": "screw piledriver",
         "spd": "screw piledriver",
@@ -675,6 +709,11 @@ def lookup_frame_data(character, move_input):
         # exact match numCmd (5MP)
         if str(row.get('numCmd', '')).lower() == move_input:
             return row
+        # prefix match for motion inputs (e.g., 623 -> 623LP)
+        if move_input.isdigit() and len(move_input) == 3:
+            num_cmd = str(row.get('numCmd', '')).lower()
+            if num_cmd.startswith(move_input):
+                return row
         # exact match plnCmd (MP)
         if str(row.get('plnCmd', '')).lower() == move_input:
             return row
@@ -1012,7 +1051,9 @@ async def on_message(message):
     is_coach_mode = "coach" in content_lower
     
 
-    fd_context_data = find_moves_in_text(content_lower)
+    fd_context_payload = find_moves_in_text(content_lower)
+    fd_context_data = fd_context_payload.get("data", "")
+    fd_context_mode = fd_context_payload.get("mode", "none")
     
 
     
@@ -1028,32 +1069,62 @@ async def on_message(message):
             )
             
         if fd_context_data:
-             # Found relevant frame data! Inject it.
-            replied_context = (
-                f"{coach_instruction}"
-                f"USER QUERY: {message.content}\n"
-                f"AVAILABLE DATA:\n{fd_context_data}\n"
-                f"{MOVE_DEFINITIONS}\n"
-                "INSTRUCTION: Use the AVAILABLE DATA to answer the user's question.\n"
-                " - If the user asks for 'frame data', 'stats', or general info, output the full data block VERBATIM.\n"
-                " - If the user asks for a SPECIFIC property (e.g. 'what is the recovery?', 'is it plus?', 'damage?'), answer DIRECTLY with just that value in a sentence. Do NOT output the full chart unless asked.\n"
-                " - Examples:\n"
-                "   User: 'Startup of Ryu 5LP?' -> Bot: 'Ryu's Stand LP has 4 frames of startup.'\n"
-                "   User: 'Ryu 5LP frame data' -> Bot: [Outputs Full Chart]\n"
-                "Even if the user asks for a comparison (like 'who is faster?'), FIRST list the full stats for valid moves, THEN add a brief 1-sentence comparison.\n"
-                "If the user asks about stats (health, reversal, etc.), use the provided **Stats** block.\n"
-                "CRITICAL: If a move's frame data is not listed in AVAILABLE DATA above, DO NOT INVENT IT. Just say you don't have the scrolls for it.\n"
-                "CRITICAL: The 'Cancel' field corresponds to the 'xx' column in the data. \n"
-                " - If Cancel is 'sp', it means Special Cancellable.\n"
-                " - If Cancel is 'su', it means Super Cancellable.\n"
-                " - If Cancel is '-' or 'No', it is NOT cancellable. Do NOT suggest canceling it.\n"
-                "Format for Moves: \n"
-                "**Move Name**\n"
-                "Startup: X // Active: Y ...\n"
-                "(Repeat for all moves)\n\n"
-                "Comparison: [Your 1 sentence comparison]"
-            )
-            should_respond = True
+            if fd_context_mode == "frame":
+                # Found relevant frame data! Inject it.
+                replied_context = (
+                    f"{coach_instruction}"
+                    f"USER QUERY: {message.content}\n"
+                    f"AVAILABLE DATA:\n{fd_context_data}\n"
+                    f"{MOVE_DEFINITIONS}\n"
+                    "INSTRUCTION: Use the AVAILABLE DATA to answer the user's question.\n"
+                    " - If the user asks for 'frame data', 'stats', or general info, output the full data block VERBATIM.\n"
+                    " - If the user asks for a SPECIFIC property (e.g. 'what is the recovery?', 'is it plus?', 'damage?'), answer DIRECTLY with just that value in a sentence. Do NOT output the full chart unless asked.\n"
+                    " - Examples:\n"
+                    "   User: 'Startup of Ryu 5LP?' -> Bot: 'Ryu's Stand LP has 4 frames of startup.'\n"
+                    "   User: 'Ryu 5LP frame data' -> Bot: [Outputs Full Chart]\n"
+                    "Even if the user asks for a comparison (like 'who is faster?'), FIRST list the full stats for valid moves, THEN add a brief 1-sentence comparison.\n"
+                    "If the user asks about stats (health, reversal, etc.), use the provided **Stats** block.\n"
+                    "CRITICAL: If a move's frame data is not listed in AVAILABLE DATA above, DO NOT INVENT IT. Just say you don't have the scrolls for it.\n"
+                    "CRITICAL: The 'Cancel' field corresponds to the 'xx' column in the data. \n"
+                    " - If Cancel is 'sp', it means Special Cancellable.\n"
+                    " - If Cancel is 'su', it means Super Cancellable.\n"
+                    " - If Cancel is '-' or 'No', it is NOT cancellable. Do NOT suggest canceling it.\n"
+                    "Format for Moves: \n"
+                    "**Move Name**\n"
+                    "Startup: X // Active: Y ...\n"
+                    "(Repeat for all moves)\n\n"
+                    "Comparison: [Your 1 sentence comparison]"
+                )
+                should_respond = True
+            elif fd_context_mode == "combo":
+                replied_context = (
+                    f"{coach_instruction}"
+                    f"USER QUERY: {message.content}\n"
+                    f"AVAILABLE DATA:\n{fd_context_data}\n"
+                    "INSTRUCTION: Use ONLY the combo/oki data in AVAILABLE DATA.\n"
+                    " - Do NOT invent frame data, move inputs, or stats that are not explicitly listed.\n"
+                    " - If the question asks for frame data or a move not shown, say the scrolls do not include it."
+                )
+                should_respond = True
+            elif fd_context_mode == "overview":
+                replied_context = (
+                    f"{coach_instruction}"
+                    f"USER QUERY: {message.content}\n"
+                    f"AVAILABLE DATA:\n{fd_context_data}\n"
+                    "INSTRUCTION: Use ONLY the overview text in AVAILABLE DATA.\n"
+                    " - Do NOT invent moves, inputs, frame data, or specific anti-air buttons unless they appear in the overview.\n"
+                    " - Answer in prose, not a table.\n"
+                    " - If the overview does not mention the requested detail, say the scrolls do not cover it."
+                )
+                should_respond = True
+            else:
+                replied_context = (
+                    f"{coach_instruction}"
+                    f"USER QUERY: {message.content}\n"
+                    f"AVAILABLE DATA:\n{fd_context_data}\n"
+                    "INSTRUCTION: Use ONLY the AVAILABLE DATA to answer the user's question."
+                )
+                should_respond = True
         elif is_coach_mode:
             # Coach mode but no specific frame data found? 
             # Still provide a coached response.
