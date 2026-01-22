@@ -136,6 +136,7 @@ FRAME_DATA = {}
 FRAME_STATS = {}
 BNB_DATA = {}  # Character combo data from per-character sheets
 OKI_DATA = {}
+CHARACTER_INFO = {}
 
 # Character name aliases (shorthand -> canonical name)
 CHARACTER_ALIASES = {
@@ -174,7 +175,7 @@ def format_sheet_text(df: pd.DataFrame) -> str:
 
 def load_frame_data():
     """Load frame data from ODS file for ALL characters."""
-    global FRAME_DATA, FRAME_STATS, BNB_DATA, OKI_DATA
+    global FRAME_DATA, FRAME_STATS, BNB_DATA, OKI_DATA, CHARACTER_INFO
     filename = "FAT - SF6 Frame Data.ods"
     
     if os.path.exists(filename):
@@ -219,6 +220,7 @@ def load_frame_data():
             
             BNB_DATA = {}
             OKI_DATA = {}
+            CHARACTER_INFO = {}
             normalized_chars = {
                 normalize_char_name(name): name
                 for name in FRAME_DATA.keys()
@@ -255,8 +257,26 @@ def load_frame_data():
                 if oki_text:
                     OKI_DATA[char_key] = oki_text
 
+            for sheet_name in xls.sheet_names:
+                lower_name = sheet_name.lower()
+                if lower_name.endswith(" combos"):
+                    continue
+                if lower_name.endswith(" okisetups") or lower_name.endswith(" setupsoki"):
+                    continue
+                if lower_name.endswith(" frame data"):
+                    continue
+                normalized_name = normalize_char_name(sheet_name)
+                char_key = normalized_chars.get(normalized_name)
+                if not char_key:
+                    continue
+                df = pd.read_excel(xls, sheet_name=sheet_name, header=None, dtype=str)
+                info_text = format_sheet_text(df)
+                if info_text:
+                    CHARACTER_INFO[char_key] = info_text
+
             print(f"Total combo sheets loaded: {len(BNB_DATA)} characters")
             print(f"Total oki sheets loaded: {len(OKI_DATA)} characters")
+            print(f"Total character info sheets loaded: {len(CHARACTER_INFO)} characters")
             
         except Exception as e:
             print(f"Error loading {filename}: {e}")
@@ -285,118 +305,161 @@ def find_moves_in_text(text):
     # Check for BNB/Combo requests
     bnb_keywords = ["combo", "combos", "bnb", "bnbs", "bread and butter", "route", "routes"]
     oki_keywords = ["oki", "okizeme", "setup", "setups", "meaty", "meaties"]
+    info_keywords = [
+        "playstyle",
+        "gameplan",
+        "archetype",
+        "overview",
+        "tell me about",
+        "who is",
+        "strengths",
+        "weaknesses",
+        "moveset",
+        "toolkit",
+        "role",
+        "how to play",
+        "character synopsis",
+        "summary",
+        "anti air",
+        "anti-air",
+        "neutral",
+        "win condition",
+    ]
+    frame_keywords = [
+        "frame data",
+        "framedata",
+        "startup",
+        "recovery",
+        "active",
+        "on block",
+        "on hit",
+        "hitstun",
+        "blockstun",
+        "frames",
+    ]
+    punish_keywords = ["punish", "punishable", "can i punish", "is it punishable"]
     wants_bnb = any(kw in text_lower for kw in bnb_keywords)
     wants_oki = any(kw in text_lower for kw in oki_keywords)
+    wants_info = any(kw in text_lower for kw in info_keywords)
+    wants_frame_data = any(kw in text_lower for kw in frame_keywords) or any(
+        kw in text_lower for kw in punish_keywords
+    )
     bnb_context = ""
+    info_blocks = []
     if wants_bnb or wants_oki:
         for char in mentioned_chars:
             if wants_bnb and char in BNB_DATA:
                 bnb_context += f"\n\n**{char.capitalize()} Combos:**\n{BNB_DATA[char]}"
             if (wants_bnb or wants_oki) and char in OKI_DATA:
                 bnb_context += f"\n\n**{char.capitalize()} Oki/Setups:**\n{OKI_DATA[char]}"
-            
-    # 2. Heuristic: For each mentioned character, search for moves mentioned nearby?
-    # Simpler approach: Check if any move inputs are present in the text
-    # that map to these characters.
-    
-    # We will try to match "[char] [input]" or just "[input]" if we can infer char.
-    # For now, let's iterate known moves for the mentioned characters to see if they are in the string.
-    # This might be slow if move lists are huge, but safer.
-    
-    # Optimization: Extract potential move-like tokens (e.g. 5MK, 2HP, Stand LP)
-    # Regex for common inputs: numeric (5MK), or textual (Stand MK)
-    move_regex = r"\b([1-9][0-9]*[a-zA-Z]+|stand\s+[a-zA-Z]+|crouch\s+[a-zA-Z]+|jump\s+[a-zA-Z]+|[a-zA-Z]+\s+kick|[a-zA-Z]+\s+punch)\b"
-    potential_inputs = re.findall(move_regex, text_lower)
-    
-    # also valid simple inputs: "mp", "hk" if preceded by char?
-    
     results = []
-    
-    for char in mentioned_chars:
-        char_data = FRAME_DATA[char]
-        
-        # Check against potential inputs found via regex
-        for inp in potential_inputs:
-             row = lookup_frame_data(char, inp)
-             if row and row not in results:
-                 results.append(row)
-                 
-        # Also check strict "frame data [char] [move]" remainder if exists
-        # (This handles the specific verified cases)
-        
-        # "brute force" check for short inputs if the regex missed them (like "mp")
-        # only if the string looks like "ryu mp"
-        if f"{char} mp" in text_lower:
-             row = lookup_frame_data(char, "mp")
-             if row and row not in results: results.append(row)
-        if f"{char} mk" in text_lower:
-             row = lookup_frame_data(char, "mk")
-             if row and row not in results: results.append(row)
-        if f"{char} hp" in text_lower:
-             row = lookup_frame_data(char, "hp")
-             if row and row not in results: results.append(row)
-        if f"{char} hk" in text_lower:
-             row = lookup_frame_data(char, "hk")
-             if row and row not in results: results.append(row)
-        if f"{char} lp" in text_lower:
-             row = lookup_frame_data(char, "lp")
-             if row and row not in results: results.append(row)
-        if f"{char} lk" in text_lower:
-             row = lookup_frame_data(char, "lk")
-             if row and row not in results: results.append(row)
-        
-        # SPD/360 variations - works for Zangief (Screw Piledriver) and Lily (Mexican Typhoon)
-        spd_patterns = [
-            ("l spd", "lp"), ("m spd", "mp"), ("h spd", "hp"),
-            ("light spd", "lp"), ("medium spd", "mp"), ("heavy spd", "hp"),
-            ("lspd", "lp"), ("mspd", "mp"), ("hspd", "hp"),
-            ("od spd", "od"), ("ex spd", "od"),
-            ("360+lp", "lp"), ("360+mp", "mp"), ("360+hp", "hp"), ("360+pp", "od"),
-            ("360lp", "lp"), ("360mp", "mp"), ("360hp", "hp"), ("360pp", "od"),
-            ("spd", ""), ("360", ""),
-        ]
-        for pattern, strength in spd_patterns:
-            if pattern in text_lower:
-                # Try both Screw Piledriver (Gief) and Mexican Typhoon (Lily)
-                if strength:
-                    move_names = [f"{strength} screw piledriver", f"{strength} mexican typhoon"]
-                else:
-                    move_names = ["screw piledriver", "mexican typhoon"]
-                for move_name in move_names:
-                    row = lookup_frame_data(char, move_name)
+    if wants_frame_data:
+        # 2. Heuristic: For each mentioned character, search for moves mentioned nearby?
+        # Simpler approach: Check if any move inputs are present in the text
+        # that map to these characters.
+
+        # We will try to match "[char] [input]" or just "[input]" if we can infer char.
+        # For now, let's iterate known moves for the mentioned characters to see if they are in the string.
+        # This might be slow if move lists are huge, but safer.
+
+        # Optimization: Extract potential move-like tokens (e.g. 5MK, 2HP, Stand LP)
+        # Regex for common inputs: numeric (5MK), or textual (Stand MK)
+        move_regex = r"\b([1-9][0-9]*[a-zA-Z]+|stand\s+[a-zA-Z]+|crouch\s+[a-zA-Z]+|jump\s+[a-zA-Z]+|[a-zA-Z]+\s+kick|[a-zA-Z]+\s+punch)\b"
+        potential_inputs = re.findall(move_regex, text_lower)
+
+        # also valid simple inputs: "mp", "hk" if preceded by char?
+
+        for char in mentioned_chars:
+            char_data = FRAME_DATA[char]
+
+            # Check against potential inputs found via regex
+            for inp in potential_inputs:
+                row = lookup_frame_data(char, inp)
+                if row and row not in results:
+                    results.append(row)
+
+            # Also check strict "frame data [char] [move]" remainder if exists
+            # (This handles the specific verified cases)
+
+            # "brute force" check for short inputs if the regex missed them (like "mp")
+            # only if the string looks like "ryu mp"
+            if f"{char} mp" in text_lower:
+                row = lookup_frame_data(char, "mp")
+                if row and row not in results:
+                    results.append(row)
+            if f"{char} mk" in text_lower:
+                row = lookup_frame_data(char, "mk")
+                if row and row not in results:
+                    results.append(row)
+            if f"{char} hp" in text_lower:
+                row = lookup_frame_data(char, "hp")
+                if row and row not in results:
+                    results.append(row)
+            if f"{char} hk" in text_lower:
+                row = lookup_frame_data(char, "hk")
+                if row and row not in results:
+                    results.append(row)
+            if f"{char} lp" in text_lower:
+                row = lookup_frame_data(char, "lp")
+                if row and row not in results:
+                    results.append(row)
+            if f"{char} lk" in text_lower:
+                row = lookup_frame_data(char, "lk")
+                if row and row not in results:
+                    results.append(row)
+
+            # SPD/360 variations - works for Zangief (Screw Piledriver) and Lily (Mexican Typhoon)
+            spd_patterns = [
+                ("l spd", "lp"), ("m spd", "mp"), ("h spd", "hp"),
+                ("light spd", "lp"), ("medium spd", "mp"), ("heavy spd", "hp"),
+                ("lspd", "lp"), ("mspd", "mp"), ("hspd", "hp"),
+                ("od spd", "od"), ("ex spd", "od"),
+                ("360+lp", "lp"), ("360+mp", "mp"), ("360+hp", "hp"), ("360+pp", "od"),
+                ("360lp", "lp"), ("360mp", "mp"), ("360hp", "hp"), ("360pp", "od"),
+                ("spd", ""), ("360", ""),
+            ]
+            for pattern, strength in spd_patterns:
+                if pattern in text_lower:
+                    # Try both Screw Piledriver (Gief) and Mexican Typhoon (Lily)
+                    if strength:
+                        move_names = [f"{strength} screw piledriver", f"{strength} mexican typhoon"]
+                    else:
+                        move_names = ["screw piledriver", "mexican typhoon"]
+                    for move_name in move_names:
+                        row = lookup_frame_data(char, move_name)
+                        if row and row not in results:
+                            results.append(row)
+                            break
+                    break  # Only match one SPD variant
+
+            # Chun-Li stance/serenity stream and followups
+            stance_patterns = [
+                ("stance lp", "stance lp"), ("stance mp", "stance mp"), ("stance hp", "stance hp"),
+                ("stance lk", "stance lk"), ("stance mk", "stance mk"), ("stance hk", "stance hk"),
+                ("ss lp", "ss lp"), ("ss mp", "ss mp"), ("ss hp", "ss hp"),
+                ("ss lk", "ss lk"), ("ss mk", "ss mk"), ("ss hk", "ss hk"),
+                ("serenity stream", "stance"), ("stance", "stance"), ("ss", "ss"),
+            ]
+            for pattern, alias_key in stance_patterns:
+                if pattern in text_lower:
+                    row = lookup_frame_data(char, alias_key)
                     if row and row not in results:
                         results.append(row)
-                        break
-                break  # Only match one SPD variant
-        
-        # Chun-Li stance/serenity stream and followups
-        stance_patterns = [
-            ("stance lp", "stance lp"), ("stance mp", "stance mp"), ("stance hp", "stance hp"),
-            ("stance lk", "stance lk"), ("stance mk", "stance mk"), ("stance hk", "stance hk"),
-            ("ss lp", "ss lp"), ("ss mp", "ss mp"), ("ss hp", "ss hp"),
-            ("ss lk", "ss lk"), ("ss mk", "ss mk"), ("ss hk", "ss hk"),
-            ("serenity stream", "stance"), ("stance", "stance"), ("ss", "ss"),
-        ]
-        for pattern, alias_key in stance_patterns:
-            if pattern in text_lower:
-                row = lookup_frame_data(char, alias_key)
-                if row and row not in results:
-                    results.append(row)
-                break  # Only match one stance variant
-        
-        # Lily Mexican Typhoon variations
-        typhoon_patterns = [
-            ("l typhoon", "l typhoon"), ("m typhoon", "m typhoon"), ("h typhoon", "h typhoon"),
-            ("light typhoon", "light typhoon"), ("medium typhoon", "medium typhoon"), ("heavy typhoon", "heavy typhoon"),
-            ("od typhoon", "od typhoon"), ("ex typhoon", "ex typhoon"),
-            ("mexican typhoon", "mexican typhoon"), ("typhoon", "typhoon"),
-        ]
-        for pattern, alias_key in typhoon_patterns:
-            if pattern in text_lower:
-                row = lookup_frame_data(char, alias_key)
-                if row and row not in results:
-                    results.append(row)
-                break  # Only match one typhoon variant
+                    break  # Only match one stance variant
+
+            # Lily Mexican Typhoon variations
+            typhoon_patterns = [
+                ("l typhoon", "l typhoon"), ("m typhoon", "m typhoon"), ("h typhoon", "h typhoon"),
+                ("light typhoon", "light typhoon"), ("medium typhoon", "medium typhoon"), ("heavy typhoon", "heavy typhoon"),
+                ("od typhoon", "od typhoon"), ("ex typhoon", "ex typhoon"),
+                ("mexican typhoon", "mexican typhoon"), ("typhoon", "typhoon"),
+            ]
+            for pattern, alias_key in typhoon_patterns:
+                if pattern in text_lower:
+                    row = lookup_frame_data(char, alias_key)
+                    if row and row not in results:
+                        results.append(row)
+                    break  # Only match one typhoon variant
 
     # Format the results
     formatted_blocks = []
@@ -432,16 +495,27 @@ def find_moves_in_text(text):
                          results.append(rev_row)
 
     # 4. AUTO-INJECT KEY MOVES (Context Injection)
-    # If we have a character but NO specific moves found (e.g. "Help me with Ryu"), 
+    # If we have a character but NO specific moves found (e.g. "Help me with Ryu"),
     # the LLM will try to give advice about buttons. We MUST provide the data for those likely buttons
     # to prevent hallucinations (like saying 5MK is special cancellable when it isn't).
-    if mentioned_chars and not results:
+    if wants_frame_data and mentioned_chars and not results:
         key_moves = ["5MP", "5MK", "2MK", "5HP", "2HP", "5HK", "2HK"]
         for char in mentioned_chars:
             for km in key_moves:
                 k_row = lookup_frame_data(char, km)
                 if k_row and k_row not in results:
                     results.append(k_row)
+
+    has_results = bool(results)
+
+    if not wants_frame_data and (
+        wants_info or (mentioned_chars and not has_results and not wants_bnb and not wants_stats)
+    ):
+        for char in mentioned_chars:
+            if char in CHARACTER_INFO:
+                info_blocks.append(
+                    f"**{char.capitalize()} Overview:**\n{CHARACTER_INFO[char]}"
+                )
 
     for move_data in results:
         def clean(val):
@@ -501,16 +575,23 @@ def find_moves_in_text(text):
         )
         formatted_blocks.append(block)
     
+    sections = []
+    if formatted_blocks:
+        sections.append("\n\n".join(formatted_blocks))
+    if info_blocks:
+        sections.append("\n\n".join(info_blocks))
+    if bnb_context:
+        sections.append(bnb_context.strip())
+
+    output = "\n\n---\n".join(sections)
+
     # Check for punish calculation
     punish_verdict = check_punish(text_lower, results)
     if punish_verdict:
-        # Prepend punish verdict to the output
-        return punish_verdict + "\n\n---\n\n" + "\n\n".join(formatted_blocks) + bnb_context
-    
-    # Combine frame data blocks with BNB context
-    output = "\n\n".join(formatted_blocks)
-    if bnb_context:
-        output += "\n\n---\n" + bnb_context
+        if output:
+            return punish_verdict + "\n\n---\n\n" + output
+        return punish_verdict
+
     return output
 
 
