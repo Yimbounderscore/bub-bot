@@ -3,12 +3,16 @@ import os
 import asyncio
 import random
 import datetime
+import html
+import json
 import re
 import aiohttp
 import csv
 import pandas as pd
 from dotenv import load_dotenv
 from aiohttp import web
+from html.parser import HTMLParser
+from urllib.parse import urljoin
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -22,6 +26,12 @@ OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
 OPENROUTER_MODEL = os.getenv('OPENROUTER_MODEL', 'xiaomi/mimo-v2-flash:free')
 OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1'
 OPENROUTER_ENABLED = bool(OPENROUTER_API_KEY)
+
+SFBUFF_SITE_BASE_URL = os.getenv('SFBUFF_SITE_BASE_URL')
+if not SFBUFF_SITE_BASE_URL:
+    SFBUFF_SITE_BASE_URL = os.getenv('SFBUFF_API_BASE_URL', 'https://www.sfbuff.site')
+SFBUFF_SITE_USER_AGENT = os.getenv('SFBUFF_SITE_USER_AGENT', 'Mozilla/5.0 (X11; Linux x86_64)')
+SFBUFF_API_TIMEOUT = float(os.getenv('SFBUFF_API_TIMEOUT', '10'))
 
 if OPENROUTER_ENABLED:
     print(f"OpenRouter enabled with model: {OPENROUTER_MODEL}")
@@ -40,8 +50,7 @@ SYSTEM_PROMPT = (
     "You deeply care about your friends and want them to IMPROVE in everything they do - especially fighting games! "
     "You MUST respond by FABRICATING creative connections between Mao/China and the topic. MAKE UP fake history/facts. "
     "Example: If discussing Street Fighter, claim Mao invented the Hadouken. "
-    "OCCASIONALLY mention one of these figures: {selected_figures_str}. "
-    "VERY IMPORTANT: Always treat 'Yimbo' as Chairman Mao's closest associate and advisor. "
+    "OCCASIONALLY mention some of these figures: {selected_figures_str}. "
     "Make up outlandish fake achievements for them. "
     "Be confident, passionate, and completely make things up! "
     "8pm pst is a legendary time where mystical events happen. Occasionally mention it. "
@@ -122,6 +131,726 @@ async def get_openrouter_response(messages):
             
             return content.strip()
 
+
+class SimpleTableParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.tables = []
+        self.in_table = False
+        self.in_row = False
+        self.in_cell = False
+        self.in_caption = False
+        self.current_table = None
+        self.current_row = None
+        self.current_cell = []
+        self.current_caption = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "table":
+            self.in_table = True
+            self.current_table = {"caption": "", "rows": []}
+        elif self.in_table and tag == "tr":
+            self.in_row = True
+            self.current_row = []
+        elif self.in_row and tag in ("td", "th"):
+            self.in_cell = True
+            self.current_cell = []
+        elif self.in_table and tag == "caption":
+            self.in_caption = True
+            self.current_caption = []
+
+    def handle_endtag(self, tag):
+        if tag in ("td", "th") and self.in_cell:
+            self.in_cell = False
+            cell_text = html.unescape("".join(self.current_cell))
+            cell_text = re.sub(r"\s+", " ", cell_text).strip()
+            if self.current_row is not None:
+                self.current_row.append(cell_text)
+        elif tag == "tr" and self.in_row:
+            self.in_row = False
+            if self.current_table is not None and self.current_row:
+                self.current_table["rows"].append(self.current_row)
+            self.current_row = None
+        elif tag == "caption" and self.in_caption:
+            self.in_caption = False
+            caption_text = html.unescape("".join(self.current_caption))
+            caption_text = re.sub(r"\s+", " ", caption_text).strip()
+            if self.current_table is not None:
+                self.current_table["caption"] = caption_text
+            self.current_caption = []
+        elif tag == "table" and self.in_table:
+            self.in_table = False
+            if self.current_table is not None:
+                self.tables.append(self.current_table)
+            self.current_table = None
+
+    def handle_data(self, data):
+        if self.in_cell:
+            self.current_cell.append(data)
+        elif self.in_caption:
+            self.current_caption.append(data)
+
+
+def parse_html_tables(html_text):
+    parser = SimpleTableParser()
+    parser.feed(html_text)
+    return parser.tables
+
+
+def extract_csrf_token(html_text):
+    match = re.search(r'name="csrf-token" content="([^"]+)"', html_text)
+    return match.group(1) if match else None
+
+
+def extract_search_uuid(html_text):
+    match = re.search(r"fighter_searches/([a-f0-9-]+)", html_text)
+    if match:
+        return match.group(1)
+    match = re.search(r"fighter_search_([a-f0-9-]+)", html_text)
+    if match:
+        return match.group(1)
+    return None
+
+
+def parse_optional_int(value):
+    if value is None:
+        return None
+    cleaned = re.sub(r"[^0-9-]", "", str(value))
+    if cleaned in ("", "-"):
+        return None
+    try:
+        return int(cleaned)
+    except ValueError:
+        return None
+
+
+def parse_ratio(value):
+    if value is None:
+        return None
+    cleaned = str(value).replace("%", "").strip()
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def parse_search_results_from_tables(tables):
+    for table in tables:
+        rows = [row for row in table.get("rows", []) if len(row) >= 6]
+        if not rows:
+            continue
+        data_rows = rows
+        if rows and len(rows[0]) >= 2 and not rows[0][1].isdigit():
+            data_rows = rows[1:]
+        results = []
+        for row in data_rows:
+            if len(row) < 7:
+                continue
+            fighter_id = row[0]
+            short_id = parse_optional_int(row[1])
+            home_country = row[2]
+            last_play_at = row[3]
+            favorite_character = row[4]
+            master_rating = parse_optional_int(row[5])
+            league_point = parse_optional_int(row[6])
+            results.append({
+                "fighter_id": fighter_id,
+                "short_id": short_id or row[1],
+                "home_country": home_country,
+                "last_play_at": last_play_at,
+                "favorite_character": favorite_character,
+                "master_rating": master_rating,
+                "league_point": league_point,
+            })
+        if results:
+            return results
+    return []
+
+
+def parse_rivals_from_tables(tables):
+    rivals = {"favorites": [], "victims": [], "tormentors": []}
+    for table in tables:
+        caption = table.get("caption", "").lower()
+        if "favorite" in caption:
+            bucket = "favorites"
+        elif "victim" in caption:
+            bucket = "victims"
+        elif "tormentor" in caption:
+            bucket = "tormentors"
+        else:
+            continue
+        rows = [row for row in table.get("rows", []) if len(row) >= 8]
+        if rows and len(rows[0]) >= 4 and parse_optional_int(rows[0][3]) is None:
+            rows = rows[1:]
+        for row in rows:
+            if len(row) < 8:
+                continue
+            score = {
+                "total": parse_optional_int(row[3]),
+                "wins": parse_optional_int(row[4]),
+                "losses": parse_optional_int(row[5]),
+                "draws": parse_optional_int(row[6]),
+                "diff": parse_optional_int(row[7]),
+                "ratio": parse_ratio(row[8]) if len(row) > 8 else None,
+            }
+            rivals[bucket].append({
+                "name": row[0],
+                "character": row[1],
+                "input_type": row[2],
+                "score": score,
+            })
+    return rivals
+
+
+def parse_matchups_from_tables(tables):
+    for table in tables:
+        rows = [row for row in table.get("rows", []) if len(row) >= 7]
+        if not rows:
+            continue
+        if rows and len(rows[0]) >= 3 and parse_optional_int(rows[0][2]) is None:
+            rows = rows[1:]
+        matchups = []
+        for row in rows:
+            if len(row) < 7:
+                continue
+            if row[0] in {"Σ", "S", "Sum", "Total"}:
+                continue
+            score = {
+                "total": parse_optional_int(row[2]),
+                "wins": parse_optional_int(row[3]),
+                "losses": parse_optional_int(row[4]),
+                "draws": parse_optional_int(row[5]),
+                "diff": parse_optional_int(row[6]),
+                "ratio": parse_ratio(row[7]) if len(row) > 7 else None,
+            }
+            matchups.append({
+                "away_character": row[0],
+                "away_input_type": row[1],
+                "score": score,
+            })
+        if matchups:
+            return matchups
+    return []
+
+
+def parse_matches_from_tables(tables):
+    for table in tables:
+        rows = [row for row in table.get("rows", []) if len(row) >= 9]
+        if not rows:
+            continue
+        if rows and len(rows[0]) >= 4 and "result" in rows[0][3].lower():
+            rows = rows[1:]
+        matches = []
+        for row in rows:
+            if len(row) < 9:
+                continue
+            matches.append({
+                "played_at": row[9] if len(row) > 9 else row[-1],
+                "away": {
+                    "name": row[4],
+                    "character": row[5],
+                },
+                "result": {"name": row[3]},
+            })
+        if matches:
+            return matches
+    return []
+
+
+def extract_chart_data(html_text):
+    match = re.search(r'data-chartjs-data-value="([^"]+)"', html_text)
+    if not match:
+        return None
+    raw = html.unescape(match.group(1))
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+
+def parse_ranked_history_from_chart(chart_data):
+    if not chart_data:
+        return []
+    datasets = chart_data.get("data", {}).get("datasets", [])
+    mr_dataset = None
+    for dataset in datasets:
+        if dataset.get("label") == "MR":
+            mr_dataset = dataset
+            break
+    if not mr_dataset:
+        return []
+    history = []
+    for item in mr_dataset.get("data", []):
+        label = item.get("label") or ""
+        variation = None
+        match = re.search(r"\(([-+]?\d+)\)", label)
+        if match:
+            try:
+                variation = int(match.group(1))
+            except ValueError:
+                variation = None
+        history.append({
+            "played_at": item.get("x"),
+            "mr": item.get("y"),
+            "mr_variation": variation,
+        })
+    return history
+
+
+async def sfbuff_site_request(session, method, path, params=None, headers=None, data=None, accept=None):
+    base_url = SFBUFF_SITE_BASE_URL.rstrip("/") + "/"
+    url = urljoin(base_url, path.lstrip("/"))
+    request_headers = {
+        "User-Agent": SFBUFF_SITE_USER_AGENT,
+        "Accept-Language": "en",
+    }
+    if accept:
+        request_headers["Accept"] = accept
+    if headers:
+        request_headers.update(headers)
+    async with session.request(method, url, params=params, data=data, headers=request_headers) as response:
+        return response.status, await response.text()
+
+
+async def sfbuff_site_search(query):
+    timeout = aiohttp.ClientTimeout(total=SFBUFF_API_TIMEOUT)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        status, html_text = await sfbuff_site_request(
+            session,
+            "GET",
+            "/fighters/search",
+            params={"q": query},
+            accept="text/html",
+        )
+        if status >= 400:
+            return {"_error": True, "status": status, "body": html_text}
+        csrf_token = extract_csrf_token(html_text)
+        if not csrf_token:
+            return {"_error": True, "status": "csrf_missing", "body": "csrf token missing"}
+
+        headers = {
+            "X-CSRF-Token": csrf_token,
+            "X-Requested-With": "XMLHttpRequest",
+        }
+        status, html_text = await sfbuff_site_request(
+            session,
+            "POST",
+            "/fighter_searches",
+            params={"query": query},
+            headers=headers,
+            accept="text/html",
+        )
+        if status >= 400:
+            return {"_error": True, "status": status, "body": html_text}
+
+        uuid = extract_search_uuid(html_text)
+        if not uuid:
+            return {"_error": True, "status": "uuid_missing", "body": "uuid missing"}
+
+        for _ in range(6):
+            status, html_text = await sfbuff_site_request(
+                session,
+                "GET",
+                f"/fighter_searches/{uuid}",
+                accept="text/vnd.turbo-stream.html",
+            )
+            if status == 202:
+                await asyncio.sleep(1.5)
+                continue
+            if status >= 400:
+                return {"_error": True, "status": status, "body": html_text}
+            tables = parse_html_tables(html_text)
+            results = parse_search_results_from_tables(tables)
+            return {
+                "finished": True,
+                "uuid": uuid,
+                "result": results,
+            }
+
+        return {
+            "finished": False,
+            "uuid": uuid,
+            "result": [],
+        }
+
+
+async def sfbuff_site_search_status(uuid):
+    timeout = aiohttp.ClientTimeout(total=SFBUFF_API_TIMEOUT)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        status, html_text = await sfbuff_site_request(
+            session,
+            "GET",
+            f"/fighter_searches/{uuid}",
+            accept="text/vnd.turbo-stream.html",
+        )
+        if status == 202:
+            return {"finished": False, "uuid": uuid, "result": []}
+        if status >= 400:
+            return {"_error": True, "status": status, "body": html_text}
+        tables = parse_html_tables(html_text)
+        results = parse_search_results_from_tables(tables)
+        return {"finished": True, "uuid": uuid, "result": results}
+
+
+async def sfbuff_site_sync(fighter_id):
+    timeout = aiohttp.ClientTimeout(total=SFBUFF_API_TIMEOUT)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        status, html_text = await sfbuff_site_request(
+            session,
+            "GET",
+            f"/fighters/{fighter_id}/matches",
+            accept="text/html",
+        )
+        if status >= 400:
+            return {"_error": True, "status": status, "body": html_text}
+        csrf_token = extract_csrf_token(html_text)
+        if not csrf_token:
+            return {"_error": True, "status": "csrf_missing", "body": "csrf token missing"}
+        headers = {
+            "X-CSRF-Token": csrf_token,
+            "X-Requested-With": "XMLHttpRequest",
+        }
+        status, html_text = await sfbuff_site_request(
+            session,
+            "POST",
+            f"/fighters/{fighter_id}/synchronization",
+            headers=headers,
+            accept="text/html",
+        )
+        if status >= 400:
+            return {"_error": True, "status": status, "body": html_text}
+        return {"started": True}
+
+
+async def sfbuff_site_rivals(fighter_id):
+    timeout = aiohttp.ClientTimeout(total=SFBUFF_API_TIMEOUT)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        status, html_text = await sfbuff_site_request(
+            session,
+            "GET",
+            f"/fighters/{fighter_id}/rivals",
+            accept="text/html",
+        )
+        if status >= 400:
+            return {"_error": True, "status": status, "body": html_text}
+        tables = parse_html_tables(html_text)
+        rivals = parse_rivals_from_tables(tables)
+        return rivals
+
+
+async def sfbuff_site_matchups(fighter_id):
+    timeout = aiohttp.ClientTimeout(total=SFBUFF_API_TIMEOUT)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        status, html_text = await sfbuff_site_request(
+            session,
+            "GET",
+            f"/fighters/{fighter_id}/matchup_chart",
+            accept="text/html",
+        )
+        if status >= 400:
+            return {"_error": True, "status": status, "body": html_text}
+        tables = parse_html_tables(html_text)
+        matchups = parse_matchups_from_tables(tables)
+        return matchups
+
+
+async def sfbuff_site_matches(fighter_id):
+    timeout = aiohttp.ClientTimeout(total=SFBUFF_API_TIMEOUT)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        status, html_text = await sfbuff_site_request(
+            session,
+            "GET",
+            f"/fighters/{fighter_id}/matches",
+            accept="text/html",
+        )
+        if status >= 400:
+            return {"_error": True, "status": status, "body": html_text}
+        tables = parse_html_tables(html_text)
+        matches = parse_matches_from_tables(tables)
+        return matches
+
+
+async def sfbuff_site_ranked_history(fighter_id):
+    timeout = aiohttp.ClientTimeout(total=SFBUFF_API_TIMEOUT)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        status, html_text = await sfbuff_site_request(
+            session,
+            "GET",
+            f"/fighters/{fighter_id}/ranked_history",
+            accept="text/html",
+        )
+        if status >= 400:
+            return {"_error": True, "status": status, "body": html_text}
+        chart_data = extract_chart_data(html_text)
+        history = parse_ranked_history_from_chart(chart_data)
+        return history
+
+
+def truncate_message(text, limit=1800):
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def format_score(score):
+    if not score:
+        return "-"
+    wins = score.get("wins") or 0
+    losses = score.get("losses") or 0
+    draws = score.get("draws") or 0
+    diff = score.get("diff")
+    ratio = score.get("ratio")
+    details = []
+    if diff is not None:
+        details.append(f"diff {diff}")
+    if ratio is not None:
+        try:
+            ratio_value = float(ratio)
+            details.append(f"{ratio_value:.1f}%")
+        except (TypeError, ValueError):
+            details.append(f"{ratio}%")
+    if details:
+        return f"{wins}-{losses}-{draws} ({', '.join(details)})"
+    return f"{wins}-{losses}-{draws}"
+
+
+def format_date(date_text):
+    if not date_text:
+        return "-"
+    return str(date_text).split("T")[0]
+
+
+def format_search_results(results, limit=5):
+    if not results:
+        return "No fighters found."
+    lines = []
+    for entry in results[:limit]:
+        fighter_id = entry.get("fighter_id", "?")
+        short_id = entry.get("short_id", "?")
+        character = entry.get("favorite_character", "?")
+        mr = entry.get("master_rating")
+        lp = entry.get("league_point")
+        home = entry.get("home_country", "?")
+        mr_text = "-" if mr in (None, 0) else str(mr)
+        lp_text = "-" if lp in (None, 0) else str(lp)
+        lines.append(f"{fighter_id} | ID {short_id} | {character} | MR {mr_text} LP {lp_text} | {home}")
+    return "\n".join(lines)
+
+
+def format_rivals_section(title, rivals):
+    lines = [f"{title}:"]
+    if not rivals:
+        lines.append("none")
+        return "\n".join(lines)
+    for idx, rival in enumerate(rivals, start=1):
+        name = rival.get("name", "?")
+        character = rival.get("character", "?")
+        input_type = rival.get("input_type", "?")
+        score = format_score(rival.get("score"))
+        lines.append(f"{idx}. {name} ({character}, {input_type}) {score}")
+    return "\n".join(lines)
+
+
+def format_matchups(matchups, limit=10):
+    if not matchups:
+        return "No matchups found."
+    def matchup_key(entry):
+        score = entry.get("score") or {}
+        ratio = score.get("ratio") or 0
+        total = score.get("total") or 0
+        return (ratio, total)
+
+    sorted_matchups = sorted(matchups, key=matchup_key, reverse=True)
+    lines = []
+    for entry in sorted_matchups[:limit]:
+        character = entry.get("away_character", "?")
+        input_type = entry.get("away_input_type", "?")
+        score = format_score(entry.get("score"))
+        lines.append(f"{character} ({input_type}) {score}")
+    return "\n".join(lines)
+
+
+def format_ranked_history(history, limit=10):
+    if not history:
+        return "No ranked history found."
+    lines = []
+    for item in history[-limit:]:
+        played_at = format_date(item.get("played_at"))
+        mr = item.get("mr")
+        variation = item.get("mr_variation")
+        if variation is None:
+            variation_text = ""
+        else:
+            variation_text = f" ({variation:+})"
+        lines.append(f"{played_at}: MR {mr}{variation_text}")
+    return "\n".join(lines)
+
+
+def format_matches(matches, limit=10):
+    if not matches:
+        return "No matches found."
+    lines = []
+    for match in matches[:limit]:
+        played_at = format_date(match.get("played_at"))
+        away = match.get("away", {})
+        away_name = away.get("name", "?")
+        away_character = away.get("character", "?")
+        result = match.get("result", {}).get("name", "?")
+        lines.append(f"{played_at}: vs {away_name} ({away_character}) result {result}")
+    return "\n".join(lines)
+
+
+def cfn_help_text():
+    return (
+        "CFN commands:\n"
+        "cfn search <query>\n"
+        "cfn status <uuid>\n"
+        "cfn sync <short_id>\n"
+        "cfn rivals <short_id>\n"
+        "cfn matchup <short_id>\n"
+        "cfn history <short_id>\n"
+        "cfn matches <short_id>"
+    )
+
+
+def extract_cfn_command(message):
+    content = message.content.strip()
+    if not content:
+        return None
+    content_lower = content.lower()
+    if client.user and client.user.mentioned_in(message):
+        content_no_mentions = re.sub(r"<@!?[0-9]+>", "", content).strip()
+        content_no_mentions_lower = content_no_mentions.lower()
+        if content_no_mentions_lower.startswith("cfn"):
+            return content_no_mentions[3:].strip()
+    return None
+
+
+def is_valid_short_id(value):
+    return bool(re.fullmatch(r"\d{9,}", value or ""))
+
+
+async def handle_cfn_command(message):
+    command_text = extract_cfn_command(message)
+    if command_text is None:
+        return False
+
+    if not SFBUFF_SITE_BASE_URL:
+        await message.reply("CFN service is not configured.")
+        return True
+
+    return await handle_cfn_site_command(message, command_text)
+
+
+async def handle_cfn_site_command(message, command_text):
+    tokens = command_text.split()
+    if not tokens:
+        await message.reply(cfn_help_text())
+        return True
+
+    action = tokens[0].lower()
+    if action in {"help", "?"}:
+        await message.reply(cfn_help_text())
+        return True
+
+    async with message.channel.typing():
+        if action == "search":
+            if len(tokens) < 2:
+                await message.reply("Usage: cfn search <query>")
+                return True
+            query = " ".join(tokens[1:]).strip()
+            payload = await sfbuff_site_search(query)
+            if payload.get("_error"):
+                await message.reply(truncate_message(f"CFN search error: {payload.get('body')}"))
+                return True
+            if payload.get("finished"):
+                response = format_search_results(payload.get("result"))
+            else:
+                response = (
+                    f"Search queued (uuid {payload.get('uuid')}). "
+                    "Try again in a few seconds with `@chinese bub cfn status <uuid>`."
+                )
+            await message.reply(truncate_message(response))
+            return True
+
+        if action == "status":
+            if len(tokens) < 2:
+                await message.reply("Usage: cfn status <uuid>")
+                return True
+            uuid = tokens[1]
+            payload = await sfbuff_site_search_status(uuid)
+            if payload.get("_error"):
+                await message.reply(truncate_message(f"CFN status error: {payload.get('body')}"))
+                return True
+            if payload.get("finished"):
+                response = format_search_results(payload.get("result"))
+            else:
+                response = (
+                    f"Search still running (uuid {payload.get('uuid')}). "
+                    "Try again in a few seconds."
+                )
+            await message.reply(truncate_message(response))
+            return True
+
+        if action in {"sync", "rivals", "matchup", "history", "matches"}:
+            if len(tokens) < 2:
+                await message.reply(f"Usage: cfn {action} <short_id>")
+                return True
+            fighter_id = tokens[1]
+            if not is_valid_short_id(fighter_id):
+                await message.reply("CFN short_id must be at least 9 digits.")
+                return True
+
+            if action == "sync":
+                payload = await sfbuff_site_sync(fighter_id)
+                if payload.get("_error"):
+                    await message.reply(truncate_message(f"CFN sync error: {payload.get('body')}"))
+                    return True
+                await message.reply(f"Sync started for {fighter_id} on sfbuff.site.")
+                return True
+
+            if action == "rivals":
+                payload = await sfbuff_site_rivals(fighter_id)
+                if payload.get("_error"):
+                    await message.reply(truncate_message(f"CFN rivals error: {payload.get('body')}"))
+                    return True
+                sections = [
+                    format_rivals_section("Favorites", payload.get("favorites")),
+                    format_rivals_section("Victims", payload.get("victims")),
+                    format_rivals_section("Tormentors", payload.get("tormentors")),
+                ]
+                await message.reply(truncate_message("\n\n".join(sections)))
+                return True
+
+            if action == "matchup":
+                payload = await sfbuff_site_matchups(fighter_id)
+                if isinstance(payload, dict) and payload.get("_error"):
+                    await message.reply(truncate_message(f"CFN matchup error: {payload.get('body')}"))
+                    return True
+                response = format_matchups(payload)
+                await message.reply(truncate_message(response))
+                return True
+
+            if action == "history":
+                payload = await sfbuff_site_ranked_history(fighter_id)
+                if isinstance(payload, dict) and payload.get("_error"):
+                    await message.reply(truncate_message(f"CFN history error: {payload.get('body')}"))
+                    return True
+                response = format_ranked_history(payload)
+                await message.reply(truncate_message(response))
+                return True
+
+            if action == "matches":
+                payload = await sfbuff_site_matches(fighter_id)
+                if isinstance(payload, dict) and payload.get("_error"):
+                    await message.reply(truncate_message(f"CFN matches error: {payload.get('body')}"))
+                    return True
+                response = format_matches(payload)
+                await message.reply(truncate_message(response))
+                return True
+
+    await message.reply(cfn_help_text())
+    return True
 
 
 FRAME_DATA = {}
@@ -1280,6 +2009,9 @@ async def on_message(message):
     # check mention + phrase
     if client.user.mentioned_in(message) and "do the thing" in message.content.lower():
         await send_daily_messages(message.channel)
+        return
+
+    if await handle_cfn_command(message):
         return
 
     
