@@ -82,10 +82,17 @@ IMPROVEMENT_PROMPT = (
     "Someone just replied to your question about improvement. Respond about their improvement journey. "
     "Give them motivation! Hype them up! Reference training, frame data, combos, ranked matches, or life skills. "
     "You can tie improvement to Chairman Mao's revolutionary spirit or Chinese resilience. "
+    "OCCASIONALLY mention some of these figures: {selected_figures_str}. Make up outlandish fake achievements for them. "
     "Be supportive but also playfully demand more from them. "
     "Never break character. "
-    "NEVER output your internal thought process."
-    "When discussing Street Fighter 6 frame data, ONLY use the data provided in 'AVAILABLE DATA' sections. Do not invent or guess frame data values."
+    "Focus on ONE single topic or story per response. Do not ramble or stray off topic. "
+    "Do not end responses with a question unless necessary. Keep it casual and natural. "
+    "Always speak the same language as the prompt. you are an english speaker by default unless prompted otherwise. "
+    "5 sentence limit. Keep it punchy. "
+    "Answer the user's message DIRECTLY first. "
+    "No Tangents. Stay on topic. Keep responses concise and relevant. "
+    "NEVER output your internal thought process. Do not use parentheses for meta-commentary. "
+    "When discussing Street Fighter 6 frame data, ONLY use the data provided in 'AVAILABLE DATA' sections. Do not invent or guess frame data values. "
     "When discussing broader street fighter topics, use the data provided in 'AVAILABLE DATA' sections. Do not invent or guess frame data values."
 )
 
@@ -870,6 +877,11 @@ CHARACTER_ALIASES = {
     "bison": "m.bison",
     "m bison": "m.bison",
     "dictator": "m.bison",
+    "viper": "c.viper",
+    "c viper": "c.viper",
+    "aki": "a.k.i",
+    "a.k.i": "a.k.i",
+    "a.k.i.": "a.k.i",
 }
 
 
@@ -914,7 +926,7 @@ def load_frame_data():
                 # Look for sheets ending in "Normal" (e.g. "ManonNormal", "RyuNormal")
                 if sheet_name.endswith("Normal"):
                     # Extract character name (ManonNormal -> manon)
-                    char_name = sheet_name.replace("Normal", "").lower()
+                    char_name = sheet_name.replace("Normal", "").rstrip(".").lower()
                     
                     # Parse the sheet
                     df = pd.read_excel(xls, sheet_name=sheet_name)
@@ -930,7 +942,7 @@ def load_frame_data():
                 
                 # Look for sheets ending in "Stats" (e.g. "ManonStats", "RyuStats")
                 elif sheet_name.endswith("Stats") and not sheet_name.startswith("_OLD"):
-                    char_name = sheet_name.replace("Stats", "").lower()
+                    char_name = sheet_name.replace("Stats", "").rstrip(".").lower()
                     df = pd.read_excel(xls, sheet_name=sheet_name)
                 
                     stats_dict = dict(zip(df['name'], df['stat']))
@@ -1734,6 +1746,13 @@ def lookup_frame_data(character, move_input):
             "heavy sbk": "hk spinning bird kick",
         },
     }
+
+    DP_PREFIX_EXCEPTIONS = {
+        "marisa": ["phalanx"],
+        "ken": ["dragonlash"],
+        "viper": ["seismo"],
+        "c.viper": ["seismo"],
+    }
     
     # Check if input matches an alias
     if move_input in INPUT_ALIASES:
@@ -1749,6 +1768,12 @@ def lookup_frame_data(character, move_input):
             return row
         # prefix match for motion inputs (e.g., 623 -> 623LP)
         if move_input.isdigit() and len(move_input) == 3:
+            if move_input == "623":
+                exception_terms = DP_PREFIX_EXCEPTIONS.get(char_key, [])
+                if exception_terms:
+                    move_name = str(row.get("moveName", "")).lower()
+                    if any(term in move_name for term in exception_terms):
+                        continue
             num_cmd = str(row.get('numCmd', '')).lower()
             if num_cmd.startswith(move_input):
                 return row
@@ -2241,7 +2266,9 @@ async def on_message(message):
                 is_improvement_reply = replied_context and "improved" in replied_context.lower()
                 
                 if is_improvement_reply:
-                    active_prompt = IMPROVEMENT_PROMPT
+                    active_prompt = IMPROVEMENT_PROMPT.format(
+                        selected_figures_str=selected_figures_str
+                    )
                 else:
                     active_prompt = SYSTEM_PROMPT.format(selected_figures_str=selected_figures_str)
                 
