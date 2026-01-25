@@ -1,11 +1,13 @@
 import discord
 import os
 import asyncio
+import base64
 import random
 import datetime
 import html
 import json
 import re
+import mimetypes
 import aiohttp
 import csv
 import pandas as pd
@@ -31,6 +33,11 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-3-flash-preview')
 GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta'
 GEMINI_ENABLED = bool(GEMINI_API_KEY)
+GEMINI_INLINE_MAX_BYTES = int(os.getenv('GEMINI_INLINE_MAX_BYTES', '10485760'))
+GEMINI_THINKING_LEVEL = os.getenv('GEMINI_THINKING_LEVEL', 'high')
+GEMINI_IMAGE_RESOLUTION = os.getenv('GEMINI_IMAGE_RESOLUTION', 'media_resolution_high')
+GEMINI_VIDEO_RESOLUTION = os.getenv('GEMINI_VIDEO_RESOLUTION', 'media_resolution_low')
+MEDIA_HISTORY_LIMIT = int(os.getenv('MEDIA_HISTORY_LIMIT', '6'))
 
 LLM_ENABLED = GEMINI_ENABLED or OPENROUTER_ENABLED
 
@@ -71,6 +78,9 @@ SYSTEM_PROMPT = (
     "Answer the user's question DIRECTLY first. "
     "No Tangents. Stay on topic. Keep responses concise and relevant."
     "NEVER output your internal thought process. Do not use parentheses for meta-commentary."
+    "If MEDIA_CONTEXT is present and viewable=true, explicitly acknowledge the media and mention one concrete visual detail in your first sentence. "
+    "If MEDIA_CONTEXT is present and viewable=false, state you cannot view the media and ask for a brief description. "
+    "Never claim to see media unless viewable=true. "
     "When discussing Street Fighter 6 frame data, ONLY use the data provided in 'AVAILABLE DATA' sections. Do not invent or guess frame data values."
     "When discussing broader street fighter topics, use the data provided in 'AVAILABLE DATA' sections. Do not invent or guess frame data values."
 )
@@ -101,6 +111,9 @@ IMPROVEMENT_PROMPT = (
     "Answer the user's message DIRECTLY first. "
     "No Tangents. Stay on topic. Keep responses concise and relevant. "
     "NEVER output your internal thought process. Do not use parentheses for meta-commentary. "
+    "If MEDIA_CONTEXT is present and viewable=true, explicitly acknowledge the media and mention one concrete visual detail in your first sentence. "
+    "If MEDIA_CONTEXT is present and viewable=false, state you cannot view the media and ask for a brief description. "
+    "Never claim to see media unless viewable=true. "
     "When discussing Street Fighter 6 frame data, ONLY use the data provided in 'AVAILABLE DATA' sections. Do not invent or guess frame data values. "
     "When discussing broader street fighter topics, use the data provided in 'AVAILABLE DATA' sections. Do not invent or guess frame data values."
 )
@@ -118,9 +131,14 @@ async def get_openrouter_response(messages):
         "X-Title": "Chinese Bub Bot"
     }
     
+    clean_messages = [
+        {"role": msg.get("role", ""), "content": msg.get("content", "")}
+        for msg in messages
+    ]
+
     payload = {
         "model": OPENROUTER_MODEL,
-        "messages": messages,
+        "messages": clean_messages,
         "max_tokens": 4096,
         "temperature": 1.0,
         "top_p": 1.0,
@@ -155,7 +173,194 @@ def has_llm_content(messages):
         content = msg.get("content", "")
         if isinstance(content, str) and content.strip():
             return True
+        parts = msg.get("parts")
+        if isinstance(parts, list) and parts:
+            return True
     return False
+
+
+def collect_embed_urls(msg):
+    urls = []
+    for embed in msg.embeds:
+        if embed.url:
+            urls.append(embed.url)
+        if embed.thumbnail and embed.thumbnail.url:
+            urls.append(embed.thumbnail.url)
+        if embed.image and embed.image.url:
+            urls.append(embed.image.url)
+        if embed.video and embed.video.url:
+            urls.append(embed.video.url)
+    return urls
+
+
+async def get_message_media_items(message):
+    items = []
+
+    def add_attachment(att):
+        items.append({
+            "url": att.url,
+            "filename": att.filename,
+            "content_type": att.content_type,
+            "size": att.size,
+        })
+
+    for att in message.attachments:
+        add_attachment(att)
+
+    for url in collect_embed_urls(message):
+        items.append({
+            "url": url,
+            "filename": os.path.basename(url.split("?")[0]) or "embed",
+            "content_type": mimetypes.guess_type(url)[0],
+            "size": None,
+        })
+
+    if message.reference and message.reference.message_id:
+        try:
+            if message.reference.cached_message:
+                replied_msg = message.reference.cached_message
+            else:
+                replied_msg = await message.channel.fetch_message(message.reference.message_id)
+            if replied_msg:
+                for att in replied_msg.attachments:
+                    add_attachment(att)
+                for url in collect_embed_urls(replied_msg):
+                    items.append({
+                        "url": url,
+                        "filename": os.path.basename(url.split("?")[0]) or "embed",
+                        "content_type": mimetypes.guess_type(url)[0],
+                        "size": None,
+                    })
+        except Exception:
+            pass
+
+    if not items:
+        media_keywords = ["image", "photo", "pic", "picture", "gif", "video", "screenshot"]
+        if any(kw in message.content.lower() for kw in media_keywords):
+            try:
+                async for prev_msg in message.channel.history(
+                    limit=MEDIA_HISTORY_LIMIT,
+                    before=message,
+                ):
+                    if prev_msg.author == client.user:
+                        continue
+                    prev_items = []
+                    for att in prev_msg.attachments:
+                        prev_items.append({
+                            "url": att.url,
+                            "filename": att.filename,
+                            "content_type": att.content_type,
+                            "size": att.size,
+                        })
+                    for url in collect_embed_urls(prev_msg):
+                        prev_items.append({
+                            "url": url,
+                            "filename": os.path.basename(url.split("?")[0]) or "embed",
+                            "content_type": mimetypes.guess_type(url)[0],
+                            "size": None,
+                        })
+                    if prev_items:
+                        items.extend(prev_items)
+                        break
+            except Exception:
+                pass
+
+    deduped = {}
+    for item in items:
+        url = item.get("url")
+        if not url:
+            continue
+        if url not in deduped:
+            deduped[url] = item
+    return list(deduped.values())
+
+
+async def build_message_media_parts(items):
+    parts = []
+    notes = []
+    if not items:
+        return parts, notes
+
+    async with aiohttp.ClientSession() as session:
+        for item in items:
+            url = item.get("url")
+            if not url:
+                continue
+            content_type = item.get("content_type") or ""
+            filename = item.get("filename") or "media"
+            size = item.get("size")
+            if not content_type:
+                guessed_type = mimetypes.guess_type(filename)[0]
+                if not guessed_type:
+                    guessed_type = mimetypes.guess_type(url.split("?")[0])[0]
+                content_type = guessed_type or ""
+            if not content_type.startswith(("image/", "video/")):
+                continue
+            if size and size > GEMINI_INLINE_MAX_BYTES:
+                notes.append(f"{filename} too large for inline media")
+                continue
+            try:
+                async with session.get(url) as response:
+                    if response.status != 200:
+                        notes.append(
+                            f"{filename} fetch failed ({response.status})"
+                        )
+                        continue
+                    data = await response.read()
+            except Exception as e:
+                notes.append(f"{filename} fetch failed ({e})")
+                continue
+            if len(data) > GEMINI_INLINE_MAX_BYTES:
+                notes.append(f"{filename} too large for inline media")
+                continue
+            if not content_type:
+                content_type = "application/octet-stream"
+            media_resolution = (
+                GEMINI_IMAGE_RESOLUTION
+                if content_type.startswith("image/")
+                else GEMINI_VIDEO_RESOLUTION
+            )
+            parts.append({
+                "inline_data": {
+                    "mime_type": content_type,
+                    "data": base64.b64encode(data).decode("ascii"),
+                },
+                "mediaResolution": {
+                    "level": media_resolution,
+                },
+            })
+    return parts, notes
+
+
+def get_media_context(items, media_parts, media_notes):
+    if not items:
+        return ""
+    image_count = 0
+    video_count = 0
+    other_count = 0
+    for item in items:
+        content_type = item.get("content_type") or ""
+        filename = item.get("filename") or ""
+        url = item.get("url") or ""
+        if not content_type:
+            guessed_type = mimetypes.guess_type(filename)[0]
+            if not guessed_type:
+                guessed_type = mimetypes.guess_type(url.split("?")[0])[0]
+            content_type = guessed_type or ""
+        if content_type.startswith("image/"):
+            image_count += 1
+        elif content_type.startswith("video/"):
+            video_count += 1
+        else:
+            other_count += 1
+    viewable = bool(media_parts)
+    if not viewable and media_notes:
+        viewable = False
+    return (
+        "MEDIA_CONTEXT: "
+        f"images={image_count}, videos={video_count}, other={other_count}, "
+        f"viewable={str(viewable).lower()}"
+    )
 
 
 def build_gemini_payload(messages):
@@ -164,8 +369,10 @@ def build_gemini_payload(messages):
     for msg in messages:
         role = msg.get("role", "")
         content = msg.get("content", "")
+        parts = msg.get("parts")
         if not content:
-            continue
+            if not parts:
+                continue
         if role == "system":
             system_parts.append(content)
             continue
@@ -173,7 +380,10 @@ def build_gemini_payload(messages):
             gemini_role = "model"
         else:
             gemini_role = "user"
-        contents.append({"role": gemini_role, "parts": [{"text": content}]})
+        if parts:
+            contents.append({"role": gemini_role, "parts": parts})
+        else:
+            contents.append({"role": gemini_role, "parts": [{"text": content}]})
     payload = {
         "contents": contents,
         "generationConfig": {
@@ -182,6 +392,11 @@ def build_gemini_payload(messages):
             "topP": 1.0,
         },
     }
+    thinking_level = (GEMINI_THINKING_LEVEL or "").strip().lower()
+    if thinking_level:
+        payload["generationConfig"]["thinkingConfig"] = {
+            "thinkingLevel": thinking_level,
+        }
     if system_parts:
         payload["systemInstruction"] = {
             "parts": [{"text": "\n\n".join(system_parts)}]
@@ -2282,11 +2497,32 @@ async def on_message(message):
             async with message.channel.typing():
                 try:
                     selected_figures_str = get_selected_figures_str(message.guild)
+                    media_parts = []
+                    media_notes = []
+                    attachments = await get_message_media_items(message)
+                    if attachments:
+                        if GEMINI_ENABLED:
+                            media_parts, media_notes = await build_message_media_parts(attachments)
+                        else:
+                            for attachment in attachments:
+                                media_notes.append(f"{attachment.filename}: {attachment.url}")
+                    media_context = get_media_context(attachments, media_parts, media_notes)
+                    user_content = message.content
+                    if media_context:
+                        user_content = f"{user_content}\n\n{media_context}"
 
                     # construct LLM messages
                     messages = [
                         {"role": "system", "content": SYSTEM_PROMPT.format(selected_figures_str=selected_figures_str)},
-                        {"role": "user", "content": message.content}
+                        {
+                            "role": "user",
+                            "content": user_content,
+                            "parts": (
+                                ([{"text": user_content}] if user_content else [])
+                                + media_parts
+                                + ([{"text": f"Media notes: {'; '.join(media_notes)}"}] if media_notes else [])
+                            ),
+                        }
                     ]
                     
                     # push to queue instead of calling directly
@@ -2452,20 +2688,29 @@ async def on_message(message):
         
         if has_gif or has_image:
             media_found = True
-            await message.reply("nice i like kpop! <:sponge:1416270403923480696>")
-            return # stop processing
 
     # llm response (mentioned OR replying to bot)
     should_respond = client.user.mentioned_in(message) or replied_context is not None
-    if should_respond and not media_found:
+    if should_respond:
         content_no_mentions = re.sub(r'<@!?[0-9]+>', '', message.content).strip()
         prompt = content_no_mentions
-        if prompt and not LLM_ENABLED:
+        media_parts = []
+        media_notes = []
+        attachments = await get_message_media_items(message)
+        if attachments:
+            if GEMINI_ENABLED:
+                media_parts, media_notes = await build_message_media_parts(attachments)
+            else:
+                for attachment in attachments:
+                    media_notes.append(f"{attachment.filename}: {attachment.url}")
+        media_context = get_media_context(attachments, media_parts, media_notes)
+        has_prompt_or_media = bool(prompt) or bool(media_parts) or bool(media_notes)
+        if has_prompt_or_media and not LLM_ENABLED:
             await message.reply(
                 "Aiya! The oracle is offline. GEMINI_API_KEY or OPENROUTER_API_KEY is missing."
             )
             return
-        if prompt and LLM_ENABLED:
+        if has_prompt_or_media and LLM_ENABLED:
              if message_queue.qsize() >= 2:
                  await message.reply("Ladies ladies! one at a time for the Chinese bubster! <:sponge:1416270403923480696>")
                  return
@@ -2505,11 +2750,30 @@ async def on_message(message):
                         llm_messages.append({"role": "assistant", "content": "Understood. I have the context."})
                 
                 # if replying to bub's message, add that as explicit context
+                user_parts = []
+                user_content = prompt
+                if media_context:
+                    user_content = f"{user_content}\n\n{media_context}" if user_content else media_context
                 if replied_context:
                     llm_messages.append({"role": "assistant", "content": replied_context})
-                    llm_messages.append({"role": "user", "content": f"(Replying to your message above) {prompt}"})
+                    if prompt:
+                        user_parts.append({"text": f"(Replying to your message above) {prompt}"})
                 else:
-                    llm_messages.append({"role": "user", "content": prompt})
+                    if prompt:
+                        user_parts.append({"text": prompt})
+                if media_parts:
+                    user_parts.extend(media_parts)
+                if media_notes:
+                    user_parts.append({"text": f"Media notes: {'; '.join(media_notes)}"})
+                if media_context:
+                    user_parts.append({"text": media_context})
+                if user_parts:
+                    user_message = {
+                        "role": "user",
+                        "content": user_content,
+                        "parts": user_parts,
+                    }
+                    llm_messages.append(user_message)
                 
                 # push to queue
                 await message_queue.put((message, llm_messages, fallback_reply))
