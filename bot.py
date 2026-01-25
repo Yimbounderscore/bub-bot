@@ -27,16 +27,25 @@ OPENROUTER_MODEL = os.getenv('OPENROUTER_MODEL', 'xiaomi/mimo-v2-flash:free')
 OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1'
 OPENROUTER_ENABLED = bool(OPENROUTER_API_KEY)
 
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-3-flash-preview')
+GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta'
+GEMINI_ENABLED = bool(GEMINI_API_KEY)
+
+LLM_ENABLED = GEMINI_ENABLED or OPENROUTER_ENABLED
+
 SFBUFF_SITE_BASE_URL = os.getenv('SFBUFF_SITE_BASE_URL')
 if not SFBUFF_SITE_BASE_URL:
     SFBUFF_SITE_BASE_URL = os.getenv('SFBUFF_API_BASE_URL', 'https://www.sfbuff.site')
 SFBUFF_SITE_USER_AGENT = os.getenv('SFBUFF_SITE_USER_AGENT', 'Mozilla/5.0 (X11; Linux x86_64)')
 SFBUFF_API_TIMEOUT = float(os.getenv('SFBUFF_API_TIMEOUT', '10'))
 
-if OPENROUTER_ENABLED:
+if GEMINI_ENABLED:
+    print(f"Gemini enabled with model: {GEMINI_MODEL}")
+elif OPENROUTER_ENABLED:
     print(f"OpenRouter enabled with model: {OPENROUTER_MODEL}")
 else:
-    print("OpenRouter API key missing. Chat feature disabled.")
+    print("No LLM API key found. Chat feature disabled.")
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -137,6 +146,82 @@ async def get_openrouter_response(messages):
             content = re.sub(r'^\s*\(.*?\)\s*', '', content, flags=re.DOTALL)
             
             return content.strip()
+
+
+def has_llm_content(messages):
+    for msg in messages:
+        if msg.get("role") == "system":
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, str) and content.strip():
+            return True
+    return False
+
+
+def build_gemini_payload(messages):
+    system_parts = []
+    contents = []
+    for msg in messages:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        if not content:
+            continue
+        if role == "system":
+            system_parts.append(content)
+            continue
+        if role == "assistant":
+            gemini_role = "model"
+        else:
+            gemini_role = "user"
+        contents.append({"role": gemini_role, "parts": [{"text": content}]})
+    payload = {
+        "contents": contents,
+        "generationConfig": {
+            "maxOutputTokens": 4096,
+            "temperature": 1.0,
+            "topP": 1.0,
+        },
+    }
+    if system_parts:
+        payload["systemInstruction"] = {
+            "parts": [{"text": "\n\n".join(system_parts)}]
+        }
+    if not contents:
+        raise RuntimeError("Gemini payload empty: no user/model content")
+    return payload
+
+
+async def get_gemini_response(messages):
+    """Call Gemini API and return the response text."""
+    if not GEMINI_ENABLED:
+        raise RuntimeError("Gemini not configured")
+    payload = build_gemini_payload(messages)
+    url = f"{GEMINI_BASE_URL}/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=payload) as response:
+            if response.status != 200:
+                error_text = await response.text()
+                raise RuntimeError(f"Gemini API error {response.status}: {error_text}")
+            data = await response.json()
+            candidates = data.get("candidates", [])
+            if not candidates:
+                raise RuntimeError("Gemini API error: empty candidates")
+            parts = candidates[0].get("content", {}).get("parts", [])
+            content = "".join(part.get("text", "") for part in parts)
+            content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
+            content = re.sub(r'^\s*\(.*?\)\s*', '', content, flags=re.DOTALL)
+            return content.strip()
+
+
+async def get_llm_response(messages):
+    """Call the configured LLM provider and return the response text."""
+    if not has_llm_content(messages):
+        raise RuntimeError("LLM payload empty: no user content")
+    if GEMINI_ENABLED:
+        return await get_gemini_response(messages)
+    if OPENROUTER_ENABLED:
+        return await get_openrouter_response(messages)
+    raise RuntimeError("No LLM provider configured")
 
 
 class SimpleTableParser(HTMLParser):
@@ -1021,19 +1106,38 @@ def find_moves_in_text(text):
     """Extract character/move mentions and return context payload with mode."""
     found_data = []
     text_lower = text.lower()
+    text_lower = re.sub(r"<@!?\d+>", " ", text_lower)
+    text_lower = re.sub(r"<@&\d+>", " ", text_lower)
+    text_lower = re.sub(r"<#\d+>", " ", text_lower)
+    text_lower = re.sub(r"\s+", " ", text_lower).strip()
+    tc_prompt_blocks = []
+    tc_ambiguous_inputs = set()
+    text_tokens = re.findall(r"[a-z0-9]+", text_lower)
+
+    def tokens_in_text(needle_tokens):
+        if not needle_tokens:
+            return False
+        if len(needle_tokens) == 1:
+            return needle_tokens[0] in text_tokens
+        for i in range(len(text_tokens) - len(needle_tokens) + 1):
+            if text_tokens[i : i + len(needle_tokens)] == needle_tokens:
+                return True
+        return False
     
     # 1. Identify which characters are mentioned
     mentioned_chars = []
     
     # First check for character aliases and normalize them
     for alias, canonical in CHARACTER_ALIASES.items():
-        if alias in text_lower:
+        alias_tokens = re.findall(r"[a-z0-9]+", alias.lower())
+        if tokens_in_text(alias_tokens):
             if canonical in FRAME_DATA and canonical not in mentioned_chars:
                 mentioned_chars.append(canonical)
     
     # Then check for direct character name matches
     for char in FRAME_DATA.keys():
-        if char in text_lower and char not in mentioned_chars:
+        char_tokens = re.findall(r"[a-z0-9]+", char)
+        if tokens_in_text(char_tokens) and char not in mentioned_chars:
             mentioned_chars.append(char)
     
     # Check for BNB/Combo requests
@@ -1071,13 +1175,24 @@ def find_moves_in_text(text):
         "blockstun",
         "frames",
     ]
+    comparison_keywords = [
+        "which is better",
+        "which is faster",
+        "compare",
+        "comparison",
+        "versus",
+    ]
     punish_keywords = ["punish", "punishable", "can i punish", "is it punishable"]
     wants_bnb = any(kw in text_lower for kw in bnb_keywords)
     wants_oki = any(kw in text_lower for kw in oki_keywords)
     wants_info = any(kw in text_lower for kw in info_keywords)
+    wants_comparison = (
+        any(kw in text_lower for kw in comparison_keywords)
+        or re.search(r"\bvs\b", text_lower)
+    )
     wants_frame_data = any(kw in text_lower for kw in frame_keywords) or any(
         kw in text_lower for kw in punish_keywords
-    )
+    ) or wants_comparison
     bnb_context = ""
     info_blocks = []
     if wants_bnb or wants_oki:
@@ -1150,6 +1265,67 @@ def find_moves_in_text(text):
         for pattern, token in charge_patterns:
             if re.search(pattern, text_lower) and token not in extra_inputs:
                 extra_inputs.append(token)
+        combo_text = text_lower.replace("->", ">")
+        tc_present = bool(
+            re.search(r"\b(tc|target combo|targetcombo)\b", text_lower)
+        )
+        combo_matches = re.findall(
+            r"\b[0-9a-zA-Z+]+(?:\s*>\s*[0-9a-zA-Z+]+)+\b",
+            combo_text,
+        )
+        for combo in combo_matches:
+            combo_token = re.sub(r"\s+", "", combo)
+            if combo_token not in extra_inputs:
+                extra_inputs.append(combo_token)
+        if tc_present and not combo_matches and mentioned_chars:
+            compact_text = re.sub(r"\s+", "", combo_text)
+            for char in mentioned_chars:
+                normalized_char = normalize_char_name(char)
+                compact_text_for_char = re.sub(
+                    rf"\b{re.escape(normalized_char)}\b", "", compact_text
+                )
+                if compact_text_for_char == compact_text:
+                    compact_text_for_char = compact_text
+                tc_map = {}
+                for row in FRAME_DATA.get(char, []):
+                    num_cmd_raw = str(row.get("numCmd", ""))
+                    num_cmd = num_cmd_raw.lower()
+                    if ">" not in num_cmd:
+                        continue
+                    base_cmd = num_cmd.split(">", 1)[0].strip()
+                    base_key = re.sub(r"\s+", "", base_cmd)
+                    if not base_key:
+                        continue
+                    tc_map.setdefault(base_key, []).append(num_cmd_raw)
+                for base_key, combos in tc_map.items():
+                    if base_key not in compact_text_for_char:
+                        continue
+                    if len(combos) == 1:
+                        combo_token = re.sub(r"\s+", "", combos[0].lower())
+                        if combo_token not in extra_inputs:
+                            extra_inputs.append(combo_token)
+                        continue
+                    tc_ambiguous_inputs.add(base_key)
+                    combo_list = "\n".join(f"- {combo}" for combo in combos)
+                    tc_prompt_blocks.append(
+                        f"**Target Combo Options ({char.capitalize()})**\n"
+                        f"{base_key.upper()} follow-ups:\n{combo_list}\n"
+                        "Reply with the exact follow-up numCmd."
+                    )
+        if tc_present:
+            combo_token_pattern = (
+                r"(?:[1-9][0-9a-zA-Z+]*|lp|mp|hp|lk|mk|hk|pp|kk|p|k)"
+            )
+            combo_sequences = re.findall(
+                rf"\b{combo_token_pattern}(?:\s+{combo_token_pattern})+\b",
+                text_lower,
+            )
+            for combo in combo_sequences:
+                if not re.search(r"\d", combo):
+                    continue
+                combo_token = re.sub(r"\s+", "", combo)
+                if combo_token not in extra_inputs:
+                    extra_inputs.append(combo_token)
         keyword_inputs = [
             # 46P moves
             "air slasher",
@@ -1242,7 +1418,7 @@ def find_moves_in_text(text):
                 if row and row not in results:
                     results.append(row)
 
-            # SPD/360 variations - for Zangief (Screw Piledriver) and Lily (Mexican Typhoon)
+        # SPD/360 variations - for Zangief (Screw Piledriver) and Lily (Mexican Typhoon)
             spd_patterns = [
                 ("l spd", "lp"), ("m spd", "mp"), ("h spd", "hp"),
                 ("light spd", "lp"), ("medium spd", "mp"), ("heavy spd", "hp"),
@@ -1408,6 +1584,9 @@ def find_moves_in_text(text):
             f"Notes: {extra_info}"
         )
         formatted_blocks.append(block)
+
+    if tc_prompt_blocks:
+        formatted_blocks.extend(tc_prompt_blocks)
     
     sections = []
     if formatted_blocks:
@@ -1454,6 +1633,9 @@ def lookup_frame_data(character, move_input):
     
     data = FRAME_DATA[char_key]
     move_input = move_input.lower().strip()
+    combo_input = None
+    if ">" in move_input or "->" in move_input:
+        combo_input = re.sub(r"\s+", "", move_input.replace("->", ">"))
     
     INPUT_ALIASES = {
         # Chun-Li
@@ -1763,8 +1945,12 @@ def lookup_frame_data(character, move_input):
     
     # search priority: numCmd -> plnCmd -> moveName
     for row in data:
+        num_cmd = str(row.get('numCmd', '')).lower()
+        if combo_input and ">" in num_cmd:
+            if re.sub(r"\s+", "", num_cmd) == combo_input:
+                return row
         # exact match numCmd (5MP)
-        if str(row.get('numCmd', '')).lower() == move_input:
+        if num_cmd == move_input:
             return row
         # prefix match for motion inputs (e.g., 623 -> 623LP)
         if move_input.isdigit() and len(move_input) == 3:
@@ -1774,7 +1960,6 @@ def lookup_frame_data(character, move_input):
                     move_name = str(row.get("moveName", "")).lower()
                     if any(term in move_name for term in exception_terms):
                         continue
-            num_cmd = str(row.get('numCmd', '')).lower()
             if num_cmd.startswith(move_input):
                 return row
         # exact match plnCmd (MP)
@@ -1998,15 +2183,23 @@ async def worker():
     while True:
         # get msg from queue
         ctx = await message_queue.get()
-        message, llm_messages = ctx
+        if len(ctx) == 3:
+            message, llm_messages, fallback_reply = ctx
+        else:
+            message, llm_messages = ctx
+            fallback_reply = None
         
         try:
             async with message.channel.typing():
-                reply_text = await get_openrouter_response(llm_messages)
+                reply_text = await get_llm_response(llm_messages)
                 await message.reply(reply_text)
         except Exception as e:
             print(f"Worker error: {e}")
-            await message.reply(f"Aiya! My brain is tired <:sponge:1416270403923480696>")
+            error_detail = str(e)
+            if fallback_reply:
+                await message.reply(f"{fallback_reply}\n\nLLM error: {error_detail}")
+            else:
+                await message.reply(f"LLM error: {error_detail}")
         finally:
             message_queue.task_done()
 
@@ -2080,7 +2273,7 @@ async def on_message(message):
     content_lower = message.content.lower()
     china_regex = r"\b(mao|xi|jinping|beijing|shanghai|8pm pst|chairman|kung fu|wushu|dim sum)\b"
     if re.search(china_regex, content_lower):
-        if OPENROUTER_ENABLED:
+        if LLM_ENABLED:
             # check queue size
             if message_queue.qsize() >= 2:
                 await message.reply("Ladies ladies! one at a time for the Chinese bubster! <:sponge:1416270403923480696>")
@@ -2097,7 +2290,7 @@ async def on_message(message):
                     ]
                     
                     # push to queue instead of calling directly
-                    await message_queue.put((message, messages))
+                    await message_queue.put((message, messages, None))
 
                 except Exception as e:
                     print(f"China praise error: {e}")
@@ -2118,6 +2311,10 @@ async def on_message(message):
     fd_context_payload = find_moves_in_text(content_lower)
     fd_context_data = fd_context_payload.get("data", "")
     fd_context_mode = fd_context_payload.get("mode", "none")
+    fallback_reply = fd_context_data if fd_context_data else None
+    explicit_frame_request = (
+        "framedata" in content_lower or "frame data" in content_lower
+    )
     
 
     
@@ -2219,6 +2416,27 @@ async def on_message(message):
         except Exception as e:
             print(f"Reply logic error: {e}")
 
+    if replied_context and "Target Combo Options" in replied_context:
+        match = re.search(r"Target Combo Options \(([^)]+)\)", replied_context)
+        char_hint = match.group(1).strip() if match else ""
+        tc_query = message.content.strip()
+        if char_hint:
+            tc_query = f"{char_hint} {tc_query} framedata"
+        else:
+            tc_query = f"{tc_query} framedata"
+        tc_payload = find_moves_in_text(tc_query.lower())
+        tc_data = tc_payload.get("data", "")
+        if tc_payload.get("mode") == "frame" and tc_data:
+            replied_context = (
+                f"USER QUERY: {tc_query}\n"
+                f"AVAILABLE DATA:\n{tc_data}\n"
+                f"{MOVE_DEFINITIONS}\n"
+                "INSTRUCTION: Use the AVAILABLE DATA to answer the user's question.\n"
+                " - If the user asks for 'frame data', output the full data block VERBATIM.\n"
+                "CRITICAL: Do not invent frame data not shown in AVAILABLE DATA."
+            )
+            explicit_frame_request = True
+
 
     # media check
     media_found = False
@@ -2242,7 +2460,12 @@ async def on_message(message):
     if should_respond and not media_found:
         content_no_mentions = re.sub(r'<@!?[0-9]+>', '', message.content).strip()
         prompt = content_no_mentions
-        if prompt and OPENROUTER_ENABLED:
+        if prompt and not LLM_ENABLED:
+            await message.reply(
+                "Aiya! The oracle is offline. GEMINI_API_KEY or OPENROUTER_API_KEY is missing."
+            )
+            return
+        if prompt and LLM_ENABLED:
              if message_queue.qsize() >= 2:
                  await message.reply("Ladies ladies! one at a time for the Chinese bubster! <:sponge:1416270403923480696>")
                  return
@@ -2289,7 +2512,7 @@ async def on_message(message):
                     llm_messages.append({"role": "user", "content": prompt})
                 
                 # push to queue
-                await message_queue.put((message, llm_messages))
+                await message_queue.put((message, llm_messages, fallback_reply))
 
              except Exception as e:
                 await message.reply(f"Error generating response: {e}")
