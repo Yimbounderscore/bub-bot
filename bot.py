@@ -35,7 +35,6 @@ GEMINI_THINKING_LEVEL = os.getenv('GEMINI_THINKING_LEVEL', 'high')
 GEMINI_IMAGE_RESOLUTION = os.getenv('GEMINI_IMAGE_RESOLUTION', 'media_resolution_high')
 GEMINI_VIDEO_RESOLUTION = os.getenv('GEMINI_VIDEO_RESOLUTION', 'media_resolution_low')
 MEDIA_HISTORY_LIMIT = int(os.getenv('MEDIA_HISTORY_LIMIT', '6'))
-IMPROVEMENT_REPLY_WINDOW_SECONDS = int(os.getenv('IMPROVEMENT_REPLY_WINDOW_SECONDS', '21600'))
 
 LLM_ENABLED = GEMINI_ENABLED or OPENROUTER_ENABLED
 
@@ -52,11 +51,6 @@ intents.members = True
 client = discord.Client(intents=intents)
 
 NEXT_RUN_TIME = None
-LAST_IMPROVEMENT_PROMPT = {
-    "channel_id": None,
-    "timestamp": None,
-    "content": None,
-}
 
 SYSTEM_PROMPT = (
     "You are Chinese Bub, a wise and eccentric sensei with an undying love for Chairman Mao, kpop, fighting games (especially Street Fighter), and Chinese history. "
@@ -1874,7 +1868,6 @@ def get_selected_figures_str(guild):
 async def send_daily_messages(channel):
     """Send scheduled daily messages to the channel."""
     print("Dispatching messages...")
-    global LAST_IMPROVEMENT_PROMPT
     messages = [
         "Hello everyone",
         "How are you today?",
@@ -1884,12 +1877,6 @@ async def send_daily_messages(channel):
     for msg in messages:
         try:
             await channel.send(msg)
-            if "improved" in msg.lower():
-                LAST_IMPROVEMENT_PROMPT = {
-                    "channel_id": channel.id,
-                    "timestamp": datetime.datetime.now(),
-                    "content": msg,
-                }
             
             await asyncio.sleep(1) 
         except Exception as e:
@@ -2243,18 +2230,6 @@ async def on_message(message):
             )
             explicit_frame_request = True
 
-    if not replied_context and not client.user.mentioned_in(message):
-        prompt_text = message.content.strip()
-        if prompt_text and LAST_IMPROVEMENT_PROMPT.get("timestamp"):
-            last_channel_id = LAST_IMPROVEMENT_PROMPT.get("channel_id")
-            last_timestamp = LAST_IMPROVEMENT_PROMPT.get("timestamp")
-            if last_channel_id == message.channel.id and last_timestamp:
-                elapsed = (datetime.datetime.now() - last_timestamp).total_seconds()
-                if elapsed <= IMPROVEMENT_REPLY_WINDOW_SECONDS:
-                    replied_context = (
-                        LAST_IMPROVEMENT_PROMPT.get("content")
-                        or "Has anyone improved?"
-                    )
 
 
     # media check
