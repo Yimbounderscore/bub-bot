@@ -35,6 +35,7 @@ GEMINI_THINKING_LEVEL = os.getenv('GEMINI_THINKING_LEVEL', 'high')
 GEMINI_IMAGE_RESOLUTION = os.getenv('GEMINI_IMAGE_RESOLUTION', 'media_resolution_high')
 GEMINI_VIDEO_RESOLUTION = os.getenv('GEMINI_VIDEO_RESOLUTION', 'media_resolution_low')
 MEDIA_HISTORY_LIMIT = int(os.getenv('MEDIA_HISTORY_LIMIT', '6'))
+GEMINI_MEDIA_RESOLUTION_ENABLED = "v1alpha" in GEMINI_BASE_URL.lower()
 
 LLM_ENABLED = GEMINI_ENABLED or OPENROUTER_ENABLED
 
@@ -170,7 +171,9 @@ def has_llm_content(messages):
                 text = part.get("text", "") if isinstance(part, dict) else ""
                 if isinstance(text, str) and text.strip():
                     return True
-                if isinstance(part, dict) and part.get("inline_data"):
+                if isinstance(part, dict) and (
+                    part.get("inlineData") or part.get("inline_data")
+                ):
                     return True
     return False
 
@@ -290,41 +293,42 @@ async def build_message_media_parts(items):
                 if not guessed_type:
                     guessed_type = mimetypes.guess_type(url.split("?")[0])[0]
                 content_type = guessed_type or ""
-            if not content_type.startswith(("image/", "video/")):
-                continue
-            if size and size > GEMINI_INLINE_MAX_BYTES:
-                notes.append(f"{filename} too large for inline media")
-                continue
+            data = None
+            final_type = ""
             try:
                 async with session.get(url) as response:
                     if response.status != 200:
-                        notes.append(
-                            f"{filename} fetch failed ({response.status})"
-                        )
+                        notes.append(f"{filename} fetch failed ({response.status})")
                         continue
                     data = await response.read()
+                    header_type = response.headers.get("Content-Type", "")
+                    final_type = header_type.split(";")[0].strip().lower()
             except Exception as e:
                 notes.append(f"{filename} fetch failed ({e})")
+                continue
+
+            if not final_type:
+                final_type = content_type
+            if not final_type.startswith(("image/", "video/")):
+                notes.append(f"{filename} unsupported type {final_type or 'unknown'}")
                 continue
             if len(data) > GEMINI_INLINE_MAX_BYTES:
                 notes.append(f"{filename} too large for inline media")
                 continue
-            if not content_type:
-                content_type = "application/octet-stream"
             media_resolution = (
                 GEMINI_IMAGE_RESOLUTION
-                if content_type.startswith("image/")
+                if final_type.startswith("image/")
                 else GEMINI_VIDEO_RESOLUTION
             )
-            parts.append({
-                "inline_data": {
-                    "mime_type": content_type,
+            part = {
+                "inlineData": {
+                    "mimeType": final_type,
                     "data": base64.b64encode(data).decode("ascii"),
-                },
-                "mediaResolution": {
-                    "level": media_resolution,
-                },
-            })
+                }
+            }
+            if GEMINI_MEDIA_RESOLUTION_ENABLED:
+                part["mediaResolution"] = {"level": media_resolution}
+            parts.append(part)
     return parts, notes
 
 
@@ -371,8 +375,21 @@ def build_gemini_payload(messages):
             if isinstance(text, str) and text.strip():
                 normalized.append({"text": text})
                 continue
-            if part.get("inline_data"):
-                normalized.append(part)
+            inline_data = part.get("inlineData") or part.get("inline_data")
+            if inline_data:
+                if "mimeType" not in inline_data and "mime_type" in inline_data:
+                    inline_data = {
+                        "mimeType": inline_data.get("mime_type"),
+                        "data": inline_data.get("data"),
+                    }
+                normalized_part = {"inlineData": inline_data}
+                media_resolution = (
+                    part.get("mediaResolution")
+                    or part.get("media_resolution")
+                )
+                if media_resolution and GEMINI_MEDIA_RESOLUTION_ENABLED:
+                    normalized_part["mediaResolution"] = media_resolution
+                normalized.append(normalized_part)
                 continue
         return normalized
     for msg in messages:
@@ -1949,6 +1966,9 @@ async def start_web_server():
 
 # message queue - initialized in on_ready to avoid event loop issues
 message_queue = None
+worker_task = None
+background_task_handle = None
+web_server_task = None
 
 async def worker():
     print("Worker started...")
@@ -1978,15 +1998,22 @@ async def worker():
 @client.event
 async def on_ready():
     global message_queue
+    global worker_task
+    global background_task_handle
+    global web_server_task
     print(f'Logged in as {client.user}')
     # create queue in the correct event loop
-    message_queue = asyncio.Queue()
+    if message_queue is None:
+        message_queue = asyncio.Queue()
     # start bg task
-    client.loop.create_task(background_task())
+    if background_task_handle is None or background_task_handle.done():
+        background_task_handle = client.loop.create_task(background_task())
     # start worker
-    client.loop.create_task(worker())
+    if worker_task is None or worker_task.done():
+        worker_task = client.loop.create_task(worker())
     # start web server
-    client.loop.create_task(start_web_server())
+    if web_server_task is None or web_server_task.done():
+        web_server_task = client.loop.create_task(start_web_server())
     # load frame data
     load_frame_data()
 
@@ -2043,7 +2070,7 @@ async def on_message(message):
 
     # China/Mao trigger
     content_lower = message.content.lower()
-    china_regex = r"\b(mao|xi|jinping|beijing|shanghai|8pm pst|chairman|kung fu|wushu|dim sum)\b"
+    china_regex = r"\b(mao|xi|jinping|beijing|shanghai|chairman|kung fu|wushu|dim sum)\b"
     if re.search(china_regex, content_lower):
         if LLM_ENABLED:
             # check queue size
@@ -2091,6 +2118,7 @@ async def on_message(message):
     # logic flags
     check_media = False
     replied_context = None  # store bub's original message if replying to bot
+    is_reply_to_bot = False
     
     
     # check mentions
@@ -2200,7 +2228,9 @@ async def on_message(message):
             # replying to bot
             if replied_msg.author == client.user:
                 check_media = True # check media on reply
-                replied_context = replied_msg.content  # capture what bub said
+                is_reply_to_bot = True
+                if "Target Combo Options" in replied_msg.content:
+                    replied_context = replied_msg.content  # capture only TC prompt
 
         except discord.NotFound:
             pass
@@ -2248,7 +2278,7 @@ async def on_message(message):
             media_found = True
 
     # llm response (mentioned OR replying to bot)
-    should_respond = client.user.mentioned_in(message) or replied_context is not None
+    should_respond = client.user.mentioned_in(message) or is_reply_to_bot or replied_context is not None
     if should_respond:
         content_no_mentions = re.sub(r'<@!?[0-9]+>', '', message.content).strip()
         prompt = content_no_mentions
