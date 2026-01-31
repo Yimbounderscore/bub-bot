@@ -43,3 +43,4 @@ sfbuff_api
 gemini-3.md
 .vscode/launch.json
 CLAUDE.md
+.claude/settings.local.json
