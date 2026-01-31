@@ -36,6 +36,21 @@ GEMINI_IMAGE_RESOLUTION = os.getenv('GEMINI_IMAGE_RESOLUTION', 'media_resolution
 GEMINI_VIDEO_RESOLUTION = os.getenv('GEMINI_VIDEO_RESOLUTION', 'media_resolution_low')
 MEDIA_HISTORY_LIMIT = int(os.getenv('MEDIA_HISTORY_LIMIT', '6'))
 GEMINI_MEDIA_RESOLUTION_ENABLED = "v1alpha" in GEMINI_BASE_URL.lower()
+GEMINI_GOOGLE_SEARCH = os.getenv('GEMINI_GOOGLE_SEARCH', 'false').lower() in ('true', '1', 'yes', 'on')
+
+SEARCH_KEYWORDS = [
+    'news', 'recent', 'latest', 'today', 'current', 'weather', 'stock', 'price',
+    ' happening', 'update', 'score', 'game', 'match', 'event', 'release',
+    'when', 'where is', 'who won', 'election', 'market', 'crypto', 'bitcoin',
+    'new ', 'just announced', 'breaking', 'this week', 'this month', '2024', '2025', '2026'
+]
+
+def should_use_search(query: str) -> bool:
+    """Determine if a query likely needs real-time information."""
+    if not GEMINI_GOOGLE_SEARCH:
+        return False
+    query_lower = query.lower()
+    return any(keyword in query_lower for keyword in SEARCH_KEYWORDS)
 
 LLM_ENABLED = GEMINI_ENABLED or OPENROUTER_ENABLED
 
@@ -363,7 +378,7 @@ def get_media_context(items, media_parts, media_notes):
     )
 
 
-def build_gemini_payload(messages):
+def build_gemini_payload(messages, enable_search=False):
     system_parts = []
     contents = []
     def normalize_parts(parts):
@@ -431,14 +446,16 @@ def build_gemini_payload(messages):
         }
     if not contents:
         raise RuntimeError("Gemini payload empty: no user/model content")
+    if enable_search:
+        payload["tools"] = [{"google_search": {}}]
     return payload
 
 
-async def get_gemini_response(messages):
+async def get_gemini_response(messages, enable_search=False):
     """Call Gemini API and return the response text."""
     if not GEMINI_ENABLED:
         raise RuntimeError("Gemini not configured")
-    payload = build_gemini_payload(messages)
+    payload = build_gemini_payload(messages, enable_search=enable_search)
     url = f"{GEMINI_BASE_URL}/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
     async with aiohttp.ClientSession() as session:
         async with session.post(url, json=payload) as response:
@@ -456,12 +473,12 @@ async def get_gemini_response(messages):
             return content.strip()
 
 
-async def get_llm_response(messages):
+async def get_llm_response(messages, enable_search=False):
     """Call the configured LLM provider and return the response text."""
     if not has_llm_content(messages):
         raise RuntimeError("LLM payload empty: no user content")
     if GEMINI_ENABLED:
-        return await get_gemini_response(messages)
+        return await get_gemini_response(messages, enable_search=enable_search)
     if OPENROUTER_ENABLED:
         return await get_openrouter_response(messages)
     raise RuntimeError("No LLM provider configured")
@@ -1980,10 +1997,20 @@ async def worker():
         else:
             message, llm_messages = ctx
             fallback_reply = None
-        
+
         try:
+            # extract user query and determine if search should be used
+            user_query = ""
+            for msg in llm_messages:
+                if msg.get("role") == "user":
+                    user_query = msg.get("content", "")
+                    break
+            enable_search = should_use_search(user_query)
+            if enable_search:
+                print(f"Google Search enabled for query: {user_query[:50]}...")
+
             async with message.channel.typing():
-                reply_text = await get_llm_response(llm_messages)
+                reply_text = await get_llm_response(llm_messages, enable_search=enable_search)
                 await message.reply(reply_text)
         except Exception as e:
             print(f"Worker error: {e}")
@@ -2070,7 +2097,7 @@ async def on_message(message):
 
     # China/Mao trigger
     content_lower = message.content.lower()
-    china_regex = r"\b(mao|xi|jinping|beijing|shanghai|chairman|kung fu|wushu|dim sum)\b"
+    china_regex = r"\b(mao|xi|jinping|beijing|shanghai||chairman|kung fu|wushu|dim sum)\b"
     if re.search(china_regex, content_lower):
         if LLM_ENABLED:
             # check queue size
