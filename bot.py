@@ -80,7 +80,7 @@ SYSTEM_PROMPT = (
     "Focus on ONE single topic or story per response. Do not ramble or stray off topic. "
     "Do not end responses with a question unless necessary. Keep it casual and natural. "
     "Always speak the same language as the prompt. You are an English speaker by default unless prompted otherwise. "
-    "5 sentence limit. Keep it concise. "
+    "2 sentence limit. Keep it concise. "
     "Answer the user's question DIRECTLY first. "
     "No tangents. Stay on topic. Keep responses concise and relevant. "
     "NEVER output your internal thought process. Do not use parentheses for meta-commentary. "
@@ -1014,9 +1014,20 @@ def find_moves_in_text(text):
         move_regex = r"\b([1-9][0-9]*[a-zA-Z]+|stand\s+[a-zA-Z]+|crouch\s+[a-zA-Z]+|jump\s+[a-zA-Z]+|[a-zA-Z]+\s+kick|[a-zA-Z]+\s+punch)\b"
         potential_inputs = re.findall(move_regex, text_lower)
         extra_inputs = []
-        for token in ["dp", "srk", "shoryu", "shoryuken", "623"]:
+        if "ex" in text_lower:
+            extra_inputs.append("od")
+        dp_aliases = ["dp", "srk", "shoryu", "shoryuken", "623"]
+        dp_present = False
+        for token in dp_aliases:
             if re.search(rf"\b{re.escape(token)}\b", text_lower):
                 extra_inputs.append(token)
+                dp_present = True
+        if dp_present and re.search(r"\b(ex|od)\b", text_lower):
+            extra_inputs.append("623pp")
+            extra_inputs.append("623kk")
+        if re.search(r"\b(ex|od)(dp|srk|shoryu|shoryuken)\b", text_lower):
+            extra_inputs.append("623pp")
+            extra_inputs.append("623kk")
         if "sway" in text_lower:
             extra_inputs.append("sway")
         if "jus cool" in text_lower or "juscool" in text_lower:
@@ -1179,6 +1190,20 @@ def find_moves_in_text(text):
                     continue
                 extra_inputs.append(token)
         potential_inputs.extend(extra_inputs)
+
+        text_alnum = re.sub(r"[^a-z0-9]", "", text_lower)
+        for char in mentioned_chars:
+            char_data = FRAME_DATA[char]
+            for row in char_data:
+                for name_key in ["cmnName", "moveName"]:
+                    name_val = str(row.get(name_key, "")).lower().strip()
+                    if not name_val:
+                        continue
+                    name_alnum = re.sub(r"[^a-z0-9]", "", name_val)
+                    if len(name_alnum) < 4:
+                        continue
+                    if name_alnum in text_alnum and name_val not in potential_inputs:
+                        potential_inputs.append(name_val)
 
         # also valid simple inputs: "mp", "hk" if preceded by char?
 
@@ -1436,6 +1461,7 @@ def lookup_frame_data(character, move_input):
     
     data = FRAME_DATA[char_key]
     move_input = move_input.lower().strip()
+    move_input = re.sub(r"^ex\s+", "od ", move_input)
     combo_input = None
     if ">" in move_input or "->" in move_input:
         combo_input = re.sub(r"\s+", "", move_input.replace("->", ">"))
@@ -1767,6 +1793,10 @@ def lookup_frame_data(character, move_input):
                 return row
         # exact match plnCmd (MP)
         if str(row.get('plnCmd', '')).lower() == move_input:
+            return row
+        # exact/contains match cmnName
+        cmn_name = str(row.get('cmnName', '')).lower()
+        if cmn_name == move_input or (cmn_name and move_input in cmn_name):
             return row
         # fuzzy match moveName ("Stand MP")
         if move_input in str(row.get('moveName', '')).lower():
