@@ -665,6 +665,40 @@ def strip_discord_mentions(content):
     return stripped
 
 
+def normalize_jump_normal_text(text):
+    if not text:
+        return ""
+    strength_map = {
+        "light": "l",
+        "medium": "m",
+        "heavy": "h",
+    }
+    button_map = {
+        "punch": "p",
+        "kick": "k",
+    }
+
+    def replace_named_jump(match):
+        prefix = match.group(1) or ""
+        strength = match.group(2)
+        button = match.group(3)
+        short = f"{strength_map[strength]}{button_map[button]}"
+        if prefix:
+            return f"neutral jump {short}"
+        return f"jump {short}"
+
+    text = re.sub(
+        r"\b(?:(neutral|n)\s+)?jump\s+(light|medium|heavy)\s+(punch|kick)\b",
+        replace_named_jump,
+        text,
+    )
+    text = re.sub(r"\bneutral\s+j\s*\.?\s*([lmh][pk])\b", r"neutral jump \1", text)
+    text = re.sub(r"\bn\.?j\s*([lmh][pk])\b", r"neutral jump \1", text)
+    text = re.sub(r"\bnj\s*([lmh][pk])\b", r"neutral jump \1", text)
+    text = re.sub(r"\bj\s*\.?\s*([lmh][pk])\b", r"jump \1", text)
+    return text
+
+
 def extract_cfn_command(message):
     content = message.content.strip()
     if not content:
@@ -967,6 +1001,7 @@ def find_moves_in_text(text):
     """Extract character/move mentions and return context payload with mode."""
     found_data = []
     text_lower = strip_discord_mentions(text).lower()
+    text_lower = normalize_jump_normal_text(text_lower)
     tc_prompt_blocks = []
     tc_ambiguous_inputs = set()
     text_tokens = re.findall(r"[a-z0-9]+", text_lower)
@@ -1514,14 +1549,15 @@ def lookup_frame_data(character, move_input):
         return None
     
     data = FRAME_DATA[char_key]
-    move_input = move_input.lower().strip()
+    move_input = normalize_jump_normal_text(move_input.lower().strip())
+    original_move_input = move_input
     neutral_tokens = []
-    input_tokens = re.findall(r"[a-z0-9]+", move_input)
+    input_tokens = re.findall(r"[a-z0-9]+", original_move_input)
     if (
         ("neutral" in input_tokens or "n" in input_tokens or "nj" in input_tokens)
         and ("jump" in input_tokens or "j" in input_tokens or "nj" in input_tokens)
     ):
-        neutral_query = move_input
+        neutral_query = original_move_input
         neutral_query = re.sub(r"\bnj\b", "n jump", neutral_query)
         neutral_query = re.sub(r"\bneutral\b", "n", neutral_query)
         neutral_query = re.sub(r"\bj\b", "jump", neutral_query)
@@ -1557,6 +1593,40 @@ def lookup_frame_data(character, move_input):
             if token not in move_name_set:
                 return False
         return True
+
+    def jump_tokens_match(query_tokens, move_name_tokens):
+        if "jump" not in query_tokens:
+            return False
+        for token in query_tokens:
+            if token in ("neutral", "n"):
+                continue
+            if token == "jump":
+                if not any(t == "j" or t.startswith("jump") for t in move_name_tokens):
+                    return False
+                continue
+            if token not in move_name_tokens:
+                return False
+        return True
+
+    if "jump" in input_tokens:
+        neutral_candidate = None
+        for row in data:
+            move_name_tokens = normalize_move_name_tokens(row.get("moveName", ""))
+            if not move_name_tokens:
+                continue
+            if neutral_tokens:
+                if neutral_tokens_match(neutral_tokens, move_name_tokens):
+                    return row
+                continue
+            if not jump_tokens_match(input_tokens, move_name_tokens):
+                continue
+            if "neutral" in move_name_tokens or "n" in move_name_tokens:
+                if neutral_candidate is None:
+                    neutral_candidate = row
+                continue
+            return row
+        if neutral_candidate:
+            return neutral_candidate
     
     INPUT_ALIASES = {
         # Chun-Li
@@ -1866,10 +1936,6 @@ def lookup_frame_data(character, move_input):
     
     # search priority: numCmd -> plnCmd -> moveName
     for row in data:
-        if neutral_tokens:
-            move_name_tokens = normalize_move_name_tokens(row.get("moveName", ""))
-            if neutral_tokens_match(neutral_tokens, move_name_tokens):
-                return row
         num_cmd = str(row.get('numCmd', '')).lower()
         if combo_input and ">" in num_cmd:
             if re.sub(r"\s+", "", num_cmd) == combo_input:
