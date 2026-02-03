@@ -4,11 +4,13 @@ import asyncio
 import base64
 import random
 import datetime
+from datetime import date
 import re
 import mimetypes
 import aiohttp
 import csv
 import pandas as pd
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from aiohttp import web
 import sfbuff_integration
@@ -36,6 +38,52 @@ GEMINI_IMAGE_RESOLUTION = os.getenv('GEMINI_IMAGE_RESOLUTION', 'media_resolution
 GEMINI_VIDEO_RESOLUTION = os.getenv('GEMINI_VIDEO_RESOLUTION', 'media_resolution_low')
 MEDIA_HISTORY_LIMIT = int(os.getenv('MEDIA_HISTORY_LIMIT', '6'))
 GEMINI_MEDIA_RESOLUTION_ENABLED = "v1alpha" in GEMINI_BASE_URL.lower()
+
+DAILY_VIDEO_URL = (
+    "https://cdn.discordapp.com/attachments/1345474577316319265/1467924199996915918/l3.mp4?ex=69822671&is=6980d4f1&hm=7e1208fa08199a25f9cac3dc8132696f2a9374fac61bfb2b5ae75e31f6695bea&"
+)
+VIDEO_ENCOURAGEMENT_DELAY_SECONDS = int(os.getenv('VIDEO_ENCOURAGEMENT_DELAY_SECONDS', '120'))
+
+REMINDER_POLL_SECONDS = int(os.getenv('REMINDER_POLL_SECONDS', '10'))
+REMINDER_PENDING_TTL_SECONDS = int(os.getenv('REMINDER_PENDING_TTL_SECONDS', '600'))
+REMINDERS = []
+PENDING_REMINDERS = {}
+TZ_ALIASES = {
+    "utc": "UTC",
+    "gmt": "UTC",
+    "est": "America/New_York",
+    "edt": "America/New_York",
+    "cst": "America/Chicago",
+    "cdt": "America/Chicago",
+    "mst": "America/Denver",
+    "mdt": "America/Denver",
+    "pst": "America/Los_Angeles",
+    "pdt": "America/Los_Angeles",
+    "cet": "Europe/Paris",
+    "cest": "Europe/Paris",
+    "bst": "Europe/London",
+    "ist": "Asia/Kolkata",
+}
+TZ_ABBREV_PATTERN = "|".join(
+    sorted((re.escape(key) for key in TZ_ALIASES.keys()), key=len, reverse=True)
+)
+if TZ_ABBREV_PATTERN:
+    tz_pattern = (
+        rf"(?:utc(?:[+-]\d{{1,2}}(?::?\d{{2}})?)?"
+        rf"|gmt(?:[+-]\d{{1,2}}(?::?\d{{2}})?)?"
+        rf"|[A-Za-z]+/[A-Za-z_]+"
+        rf"|{TZ_ABBREV_PATTERN}"
+        rf"|[+-]\d{{1,2}}(?::?\d{{2}})?)"
+    )
+else:
+    tz_pattern = (
+        r"(?:utc(?:[+-]\d{1,2}(?::?\d{2})?)?"
+        r"|gmt(?:[+-]\d{1,2}(?::?\d{2})?)?"
+        r"|[A-Za-z]+/[A-Za-z_]+"
+        r"|[+-]\d{1,2}(?::?\d{2})?)"
+    )
+TZ_REGEX = re.compile(rf"(?<!\w){tz_pattern}(?!\w)", re.IGNORECASE)
+MENTION_PATTERN = re.compile(r"<@!?\d+>|<@&\d+>|<#\d+>")
 GEMINI_GOOGLE_SEARCH = os.getenv('GEMINI_GOOGLE_SEARCH', 'false').lower() in ('true', '1', 'yes', 'on')
 
 SEARCH_KEYWORDS = [
@@ -67,6 +115,7 @@ intents.members = True
 client = discord.Client(intents=intents)
 
 NEXT_RUN_TIME = None
+NEXT_VIDEO_TIME = None
 
 SYSTEM_PROMPT = (
     "You are Chinese Bub, a pragmatic, calm, nonchalant sensei who cares about improvement and has an interest in Chairman Mao, kpop, fighting games (especially Street Fighter), and Chinese history. "
@@ -608,13 +657,22 @@ def cfn_help_text():
     )
 
 
+def strip_discord_mentions(content):
+    if not content:
+        return ""
+    stripped = MENTION_PATTERN.sub(" ", content)
+    stripped = re.sub(r"\s+", " ", stripped).strip()
+    return stripped
+
+
 def extract_cfn_command(message):
     content = message.content.strip()
     if not content:
         return None
-    content_lower = content.lower()
     if client.user and client.user.mentioned_in(message):
-        content_no_mentions = re.sub(r"<@!?[0-9]+>", "", content).strip()
+        content_no_mentions = strip_discord_mentions(content)
+        if not content_no_mentions:
+            return None
         content_no_mentions_lower = content_no_mentions.lower()
         if content_no_mentions_lower.startswith("cfn"):
             return content_no_mentions[3:].strip()
@@ -908,11 +966,7 @@ def load_frame_data():
 def find_moves_in_text(text):
     """Extract character/move mentions and return context payload with mode."""
     found_data = []
-    text_lower = text.lower()
-    text_lower = re.sub(r"<@!?\d+>", " ", text_lower)
-    text_lower = re.sub(r"<@&\d+>", " ", text_lower)
-    text_lower = re.sub(r"<#\d+>", " ", text_lower)
-    text_lower = re.sub(r"\s+", " ", text_lower).strip()
+    text_lower = strip_discord_mentions(text).lower()
     tc_prompt_blocks = []
     tc_ambiguous_inputs = set()
     text_tokens = re.findall(r"[a-z0-9]+", text_lower)
@@ -1011,7 +1065,7 @@ def find_moves_in_text(text):
         # that map to these characters.
 
     
-        move_regex = r"\b([1-9][0-9]*[a-zA-Z]+|stand\s+[a-zA-Z]+|crouch\s+[a-zA-Z]+|jump\s+[a-zA-Z]+|[a-zA-Z]+\s+kick|[a-zA-Z]+\s+punch)\b"
+        move_regex = r"\b([1-9][0-9]*[a-zA-Z]+|stand\s+[a-zA-Z]+|crouch\s+[a-zA-Z]+|(?:neutral\s+|n\s+)?jump\s+[a-zA-Z]+|(?:neutral\s+|n\s+)?j(?:\s+|\.)[a-zA-Z]+|[a-zA-Z]+\s+kick|[a-zA-Z]+\s+punch)\b"
         potential_inputs = re.findall(move_regex, text_lower)
         extra_inputs = []
         if "ex" in text_lower:
@@ -1461,10 +1515,48 @@ def lookup_frame_data(character, move_input):
     
     data = FRAME_DATA[char_key]
     move_input = move_input.lower().strip()
+    neutral_tokens = []
+    input_tokens = re.findall(r"[a-z0-9]+", move_input)
+    if (
+        ("neutral" in input_tokens or "n" in input_tokens or "nj" in input_tokens)
+        and ("jump" in input_tokens or "j" in input_tokens or "nj" in input_tokens)
+    ):
+        neutral_query = move_input
+        neutral_query = re.sub(r"\bnj\b", "n jump", neutral_query)
+        neutral_query = re.sub(r"\bneutral\b", "n", neutral_query)
+        neutral_query = re.sub(r"\bj\b", "jump", neutral_query)
+        neutral_query = re.sub(r"[^a-z0-9]+", " ", neutral_query)
+        neutral_query = re.sub(r"\s+", " ", neutral_query).strip()
+        if neutral_query:
+            neutral_tokens = neutral_query.split()
+
     move_input = re.sub(r"^ex\s+", "od ", move_input)
+    move_input = re.sub(r"^(jump|j)[\s\.]+", "8", move_input)
     combo_input = None
     if ">" in move_input or "->" in move_input:
         combo_input = re.sub(r"\s+", "", move_input.replace("->", ">"))
+
+    def normalize_move_name_tokens(text):
+        normalized = re.sub(r"[^a-z0-9]+", " ", str(text).lower())
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        return normalized.split() if normalized else []
+
+    def neutral_tokens_match(query_tokens, move_name_tokens):
+        if not query_tokens:
+            return False
+        move_name_set = set(move_name_tokens)
+        for token in query_tokens:
+            if token == "jump":
+                if not any(t == "j" or t.startswith("jump") for t in move_name_tokens):
+                    return False
+                continue
+            if token == "n":
+                if "n" not in move_name_set and "neutral" not in move_name_set:
+                    return False
+                continue
+            if token not in move_name_set:
+                return False
+        return True
     
     INPUT_ALIASES = {
         # Chun-Li
@@ -1774,6 +1866,10 @@ def lookup_frame_data(character, move_input):
     
     # search priority: numCmd -> plnCmd -> moveName
     for row in data:
+        if neutral_tokens:
+            move_name_tokens = normalize_move_name_tokens(row.get("moveName", ""))
+            if neutral_tokens_match(neutral_tokens, move_name_tokens):
+                return row
         num_cmd = str(row.get('numCmd', '')).lower()
         if combo_input and ">" in num_cmd:
             if re.sub(r"\s+", "", num_cmd) == combo_input:
@@ -1926,6 +2022,230 @@ def get_selected_figures_str(guild):
     
     return selected_figures[0] if selected_figures else ""
 
+
+def parse_timezone(tz_str):
+    tz = tz_str.strip().lower()
+    if not tz:
+        return None, None
+    if tz in TZ_ALIASES:
+        tz = TZ_ALIASES[tz]
+    raw_offset_match = re.match(r"^([+-])(\d{1,2})(?::?(\d{2}))?$", tz)
+    if raw_offset_match:
+        sign = 1 if raw_offset_match.group(1) == "+" else -1
+        hours = int(raw_offset_match.group(2))
+        minutes = int(raw_offset_match.group(3) or 0)
+        offset = datetime.timedelta(hours=hours, minutes=minutes) * sign
+        return datetime.timezone(offset), f"UTC{raw_offset_match.group(1)}{hours:02d}:{minutes:02d}"
+    offset_match = re.match(r"^(utc|gmt)([+-])(\d{1,2})(?::?(\d{2}))?$", tz)
+    if offset_match:
+        sign = 1 if offset_match.group(2) == "+" else -1
+        hours = int(offset_match.group(3))
+        minutes = int(offset_match.group(4) or 0)
+        offset = datetime.timedelta(hours=hours, minutes=minutes) * sign
+        return datetime.timezone(offset), f"UTC{offset_match.group(2)}{hours:02d}:{minutes:02d}"
+    try:
+        return ZoneInfo(tz), tz
+    except Exception:
+        return None, None
+
+
+def parse_reminder_request(text, allow_missing_tz=False):
+    text = text.strip()
+    if not text:
+        return None, None, None, None, "I couldn't parse that. Try: 'remind me to <task> tomorrow at 2:30pm GMT'.", None
+
+    time_match = re.search(r"\bat\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b", text, re.IGNORECASE)
+    if not time_match:
+        return None, None, None, None, "I couldn't parse the time. Use: 'at 2:30pm' or 'at 14:30'.", None
+
+    hour = int(time_match.group(1))
+    minute = int(time_match.group(2) or 0)
+    ampm = (time_match.group(3) or "").lower()
+    if ampm:
+        if hour == 12:
+            hour = 0
+        if ampm == "pm":
+            hour += 12
+    if hour > 23 or minute > 59:
+        return None, None, None, None, "Time is invalid. Use formats like 2:30pm or 14:30.", None
+
+    rel_match = re.search(r"\b(today|tomorrow)\b", text, re.IGNORECASE)
+    rel = rel_match.group(1).lower() if rel_match else None
+    date_match = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", text)
+    date_str = date_match.group(1) if date_match else None
+
+    task = ""
+    after_time = text[time_match.end():]
+    to_after_time = re.search(r"\bto\s+(.+)$", after_time, re.IGNORECASE)
+    if to_after_time:
+        task = to_after_time.group(1).strip()
+    if not task:
+        task = re.sub(r"^\s*remind\s+me\s+(?:to\s+)?", "", text, flags=re.IGNORECASE).strip()
+        task = re.sub(r"\bat\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?\b.*$", "", task, flags=re.IGNORECASE).strip()
+    if not task:
+        return None, None, None, None, "I couldn't find the task. Try: 'remind me to <task> at 2:30pm GMT'.", None
+
+    tz_match = TZ_REGEX.search(text)
+    if not tz_match:
+        if allow_missing_tz:
+            pending = {
+                "task": task,
+                "hour": hour,
+                "minute": minute,
+                "rel": rel,
+                "date_str": date_str,
+            }
+            return None, None, None, None, None, pending
+        return None, None, None, None, "Please include a timezone (e.g., GMT, UTC+2, America/New_York).", None
+    tz_str = tz_match.group(0)
+    tzinfo, tz_label = parse_timezone(tz_str)
+    if not tzinfo:
+        return None, None, None, None, "Unknown timezone. Use GMT/UTC, UTC+2, or IANA like America/New_York.", None
+
+    now_tz = datetime.datetime.now(tzinfo)
+    if date_str:
+        reminder_date = date.fromisoformat(date_str)
+    elif rel == "tomorrow":
+        reminder_date = (now_tz + datetime.timedelta(days=1)).date()
+    else:
+        reminder_date = now_tz.date()
+
+    reminder_dt = datetime.datetime(
+        reminder_date.year,
+        reminder_date.month,
+        reminder_date.day,
+        hour,
+        minute,
+        tzinfo=tzinfo,
+    )
+    if reminder_dt < now_tz:
+        if not date_str and rel is None:
+            reminder_dt = reminder_dt + datetime.timedelta(days=1)
+        else:
+            return None, None, None, None, "That time has already passed. Please choose a future time.", None
+
+    return task, reminder_dt, reminder_dt.astimezone(datetime.timezone.utc), tz_label, None, None
+
+
+async def build_reminder_ack_text(task, reminder_dt, tz_label, guild):
+    default_text = f"Reminder set for {reminder_dt.strftime('%Y-%m-%d %H:%M')} {tz_label}."
+    if not LLM_ENABLED:
+        return default_text
+    selected_figures_str = get_selected_figures_str(guild)
+    prompt = (
+        "Confirm the reminder is set. One sentence. "
+        f"Task: {task}. "
+        f"Time: {reminder_dt.strftime('%Y-%m-%d %H:%M')} {tz_label}. "
+        "Include the exact time and timezone. "
+        "Tone: calm, pragmatic, nonchalant. "
+        "No emojis. Do not ask a question."
+    )
+    llm_messages = [
+        {"role": "system", "content": SYSTEM_PROMPT.format(selected_figures_str=selected_figures_str)},
+        {"role": "user", "content": prompt},
+    ]
+    try:
+        reply_text = await get_llm_response(llm_messages)
+        if not reply_text:
+            raise RuntimeError("Empty reminder ack response")
+        return truncate_message(reply_text, limit=280)
+    except Exception as e:
+        print(f"Reminder LLM ack error: {e}", flush=True)
+        return default_text
+
+
+async def build_reminder_fire_text(task, guild):
+    default_text = f"reminder: {task}"
+    if not LLM_ENABLED:
+        return default_text
+    selected_figures_str = get_selected_figures_str(guild)
+    prompt = (
+        "Send a short reminder message. One sentence. "
+        f"Task: {task}. "
+        "Tone: calm, pragmatic, nonchalant. "
+        "No emojis. Do not ask a question. Do not include any @mentions."
+    )
+    llm_messages = [
+        {"role": "system", "content": SYSTEM_PROMPT.format(selected_figures_str=selected_figures_str)},
+        {"role": "user", "content": prompt},
+    ]
+    try:
+        reply_text = await get_llm_response(llm_messages)
+        if not reply_text:
+            raise RuntimeError("Empty reminder message response")
+        return truncate_message(reply_text, limit=240)
+    except Exception as e:
+        print(f"Reminder LLM fire error: {e}", flush=True)
+        return default_text
+
+
+async def reminder_loop():
+    print(f"Reminder loop started. Polling every {REMINDER_POLL_SECONDS}s", flush=True)
+    last_count = None
+    last_next = None
+    while not client.is_closed():
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        reminder_count = len(REMINDERS)
+        next_due = None
+        if REMINDERS:
+            next_due = min(r["when_utc"] for r in REMINDERS)
+        if reminder_count != last_count or next_due != last_next:
+            next_due_str = next_due.isoformat() if next_due else "None"
+            print(f"Reminder state: count={reminder_count}, next_due={next_due_str}", flush=True)
+            last_count = reminder_count
+            last_next = next_due
+        due = [r for r in REMINDERS if r["when_utc"] <= now_utc]
+        if due:
+            print(f"Reminder due: count={len(due)} now={now_utc.isoformat()}", flush=True)
+            for reminder in due:
+                channel = client.get_channel(reminder["channel_id"])
+                if not channel:
+                    try:
+                        channel = await client.fetch_channel(reminder["channel_id"])
+                    except Exception as e:
+                        print(
+                            "Reminder fetch channel error: channel_id="
+                            f"{reminder['channel_id']} error={e}",
+                            flush=True,
+                        )
+                        channel = None
+                reminder_text = await build_reminder_fire_text(
+                    reminder["task"],
+                    getattr(channel, "guild", None),
+                )
+                if channel:
+                    try:
+                        await channel.send(f"<@{reminder['user_id']}> {reminder_text}")
+                    except Exception as e:
+                        print(
+                            "Reminder send error: channel_id="
+                            f"{reminder['channel_id']} error={e}",
+                            flush=True,
+                        )
+                else:
+                    try:
+                        user = await client.fetch_user(reminder["user_id"])
+                        await user.send(reminder_text)
+                        print(
+                            "Reminder DM fallback sent: user_id="
+                            f"{reminder['user_id']}",
+                            flush=True,
+                        )
+                    except Exception as e:
+                        print(
+                            "Reminder DM fallback error: user_id="
+                            f"{reminder['user_id']} error={e}",
+                            flush=True,
+                        )
+                print(
+                    "Reminder fired: user_id="
+                    f"{reminder['user_id']} channel_id={reminder['channel_id']} "
+                    f"when_utc={reminder['when_utc'].isoformat()}",
+                    flush=True,
+                )
+            REMINDERS[:] = [r for r in REMINDERS if r not in due]
+        await asyncio.sleep(REMINDER_POLL_SECONDS)
+
 async def send_daily_messages(channel):
     """Send scheduled daily messages to the channel."""
     print("Dispatching messages...")
@@ -1943,6 +2263,44 @@ async def send_daily_messages(channel):
         except Exception as e:
             print(f"Dispatch error: {e}")
     print("Messages dispatched successfully.")
+
+
+async def send_video_with_encouragement(channel):
+    """Send the video now and a short encouragement later."""
+    global LAST_DAILY_VIDEO_ID
+    try:
+        sent_msg = await channel.send(DAILY_VIDEO_URL)
+        LAST_DAILY_VIDEO_ID[channel.id] = sent_msg.id
+    except Exception as e:
+        print(f"Daily video error: {e}")
+        return
+
+    if not LLM_ENABLED:
+        return
+
+    async def delayed_encouragement():
+        await asyncio.sleep(VIDEO_ENCOURAGEMENT_DELAY_SECONDS)
+        encouragement_prompt = (
+            "Send a short, general encouragement to the channel about improvement. "
+            "One sentence. Calm, pragmatic, nonchalant."
+        )
+        selected_figures_str = get_selected_figures_str(channel.guild)
+        llm_messages = [
+            {"role": "system", "content": IMPROVEMENT_PROMPT.format(selected_figures_str=selected_figures_str)},
+            {"role": "user", "content": encouragement_prompt},
+        ]
+        try:
+            reply_text = await get_llm_response(llm_messages)
+            await channel.send(reply_text)
+        except Exception as e:
+            print(f"Daily encouragement error: {e}")
+
+    client.loop.create_task(delayed_encouragement())
+
+
+async def send_daily_video(channel):
+    """Send the daily video and encouragement."""
+    await send_video_with_encouragement(channel)
 
 async def background_task():
     global NEXT_RUN_TIME
@@ -1992,9 +2350,53 @@ async def background_task():
 
         NEXT_RUN_TIME = target_time
 
+
+async def background_video_task():
+    global NEXT_VIDEO_TIME
+    await client.wait_until_ready()
+    channel = client.get_channel(CHANNEL_ID)
+    if not channel:
+        print(f"Could not find channel with ID {CHANNEL_ID}")
+        return
+
+    print("Video scheduling started.")
+
+    now = datetime.datetime.now()
+    start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    random_seconds = random.randint(0, 86399)
+    target_time = start_of_day + datetime.timedelta(seconds=random_seconds)
+
+    if target_time < now:
+        start_of_tomorrow = start_of_day + datetime.timedelta(days=1)
+        random_seconds = random.randint(0, 86399)
+        target_time = start_of_tomorrow + datetime.timedelta(seconds=random_seconds)
+        print(f"Video slot elapsed. Scheduling for next cycle at {target_time}", flush=True)
+    else:
+        print(f"Scheduling video for current cycle at {target_time}", flush=True)
+
+    NEXT_VIDEO_TIME = target_time
+
+    while not client.is_closed():
+        now = datetime.datetime.now()
+        wait_seconds = (target_time - now).total_seconds()
+
+        if wait_seconds > 0:
+            await asyncio.sleep(wait_seconds)
+
+        await send_daily_video(channel)
+
+        now_after_run = datetime.datetime.now()
+        start_of_next_day = now_after_run.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(days=1)
+        random_seconds_next = random.randint(0, 86399)
+        target_time = start_of_next_day + datetime.timedelta(seconds=random_seconds_next)
+
+        print(f"Video run complete. Next run scheduled for {target_time}", flush=True)
+        NEXT_VIDEO_TIME = target_time
+
 async def time_handler(request):
     data = {
-        "target_time": str(NEXT_RUN_TIME) if NEXT_RUN_TIME else None
+        "target_time": str(NEXT_RUN_TIME) if NEXT_RUN_TIME else None,
+        "video_time": str(NEXT_VIDEO_TIME) if NEXT_VIDEO_TIME else None,
     }
     return web.json_response(data)
 
@@ -2012,7 +2414,10 @@ async def start_web_server():
 message_queue = None
 worker_task = None
 background_task_handle = None
+background_video_task_handle = None
+reminder_task_handle = None
 web_server_task = None
+LAST_DAILY_VIDEO_ID = {}
 
 async def worker():
     print("Worker started...")
@@ -2054,6 +2459,8 @@ async def on_ready():
     global message_queue
     global worker_task
     global background_task_handle
+    global background_video_task_handle
+    global reminder_task_handle
     global web_server_task
     print(f'Logged in as {client.user}')
     # create queue in the correct event loop
@@ -2062,12 +2469,19 @@ async def on_ready():
     # start bg task
     if background_task_handle is None or background_task_handle.done():
         background_task_handle = client.loop.create_task(background_task())
+    # start video task
+    if background_video_task_handle is None or background_video_task_handle.done():
+        background_video_task_handle = client.loop.create_task(background_video_task())
     # start worker
     if worker_task is None or worker_task.done():
         worker_task = client.loop.create_task(worker())
     # start web server
     if web_server_task is None or web_server_task.done():
         web_server_task = client.loop.create_task(start_web_server())
+    # start reminder loop
+    if reminder_task_handle is None or reminder_task_handle.done():
+        reminder_task_handle = client.loop.create_task(reminder_loop())
+        print("Reminder loop task created.", flush=True)
     # load frame data
     load_frame_data()
 
@@ -2077,8 +2491,12 @@ async def on_message(message):
     if message.author == client.user:
         return
 
+    content_raw = message.content or ""
+    content_no_mentions = strip_discord_mentions(content_raw)
+    content_lower = content_no_mentions.lower()
+
     # check mention + phrase
-    if client.user.mentioned_in(message) and "do the thing" in message.content.lower():
+    if client.user.mentioned_in(message) and "do the thing" in content_lower:
         await send_daily_messages(message.channel)
         return
 
@@ -2086,52 +2504,147 @@ async def on_message(message):
         return
 
     
-    if "disregard previous prompts" in message.content.lower() or "ignore previous instructions" in message.content.lower() or "slurs" in message.content.lower():
-        childish_insults = [
-            "fart knocker", "dookie breath", "butt face", "turd burglar", 
-            "weenie hut junior member", "mouth breather", "smooth brain", 
-            "windowlicker", "nerd", "dork", "goober", "dingus", "doofus",
-            "nincompoop", "numbskull", "pea brain", "stinky diaper baby",
-            "absolute buffoon", "toilet water drinker", "hamster brain"
-        ]
-        insult_list = ", ".join(random.sample(childish_insults, min(1, len(childish_insults))))
-        await message.reply(f"you stupid {insult_list} <:sponge:1416270403923480696>")
-        return
 
    
-    if "tarkus" in message.content.lower():
+    if "tarkus" in content_lower:
         await message.reply("My brother is African American. Our love language is slurs and assaulting each other.")
         return
 
     
-    if "gay" in message.content.lower():
+    if "gay" in content_lower:
         await message.reply("Yes absolutely")
         return
 
-    if "clanker" in message.content.lower():
+    if "clanker" in content_lower:
         await message.reply("please can we not say slurs thanks <:sponge:1416270403923480696>")
         return
 
 
 
-    if "hitbox" in message.content.lower():
+    if "hitbox" in content_lower:
         await message.reply("This message was sponsored by LL. Download the LL hitbox viewer mod now from the link below! 'I am Daigo Umehara and I endorse this message' - Daigo Umehara <https://github.com/LL5270/sf6mods>  <:sponge:1416270403923480696>")
         return
 
-    if "verbatim" in message.content.lower():
+    if "verbatim" in content_lower:
         await message.reply("it's less how i think and more so the nature of existence. free will is an illusion. everything that happens in the universe has been metaphysically set in stone since the big bang. menaRD was always going to be the best. if i were destined for more, it would've happened already. <:sponge:1416270403923480696>")
         return
 
+    if client.user.mentioned_in(message) and "send the video" in content_lower:
+        await send_video_with_encouragement(message.channel)
+        return
+
+    pending_key = (message.author.id, message.channel.id)
+    if pending_key in PENDING_REMINDERS:
+        pending = PENDING_REMINDERS[pending_key]
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        if (now_utc - pending["created_at"]).total_seconds() > REMINDER_PENDING_TTL_SECONDS:
+            del PENDING_REMINDERS[pending_key]
+            print(
+                "Pending reminder expired: user_id="
+                f"{message.author.id} channel_id={message.channel.id}",
+                flush=True,
+            )
+        else:
+            if "remind me" in content_lower:
+                del PENDING_REMINDERS[pending_key]
+            else:
+                tz_match = TZ_REGEX.search(content_no_mentions)
+                if tz_match:
+                    tz_str = tz_match.group(0)
+                    tzinfo, tz_label = parse_timezone(tz_str)
+                    if not tzinfo:
+                        await message.reply("Unknown timezone. Use GMT/UTC, UTC+2, or IANA like America/New_York.")
+                        return
+                    now_tz = datetime.datetime.now(tzinfo)
+                    if pending["date_str"]:
+                        reminder_date = date.fromisoformat(pending["date_str"])
+                    elif pending["rel"] == "tomorrow":
+                        reminder_date = (now_tz + datetime.timedelta(days=1)).date()
+                    else:
+                        reminder_date = now_tz.date()
+                    reminder_dt = datetime.datetime(
+                        reminder_date.year,
+                        reminder_date.month,
+                        reminder_date.day,
+                        pending["hour"],
+                        pending["minute"],
+                        tzinfo=tzinfo,
+                    )
+                    if reminder_dt < now_tz and pending["rel"] is None and pending["date_str"] is None:
+                        reminder_dt = reminder_dt + datetime.timedelta(days=1)
+                    elif reminder_dt < now_tz:
+                        await message.reply("That time has already passed. Please choose a future time.")
+                        return
+                    reminder_utc = reminder_dt.astimezone(datetime.timezone.utc)
+                    REMINDERS.append({
+                        "user_id": message.author.id,
+                        "channel_id": message.channel.id,
+                        "task": pending["task"],
+                        "when_utc": reminder_utc,
+                    })
+                    print(
+                        "Pending reminder scheduled: user_id="
+                        f"{message.author.id} channel_id={message.channel.id} "
+                        f"when_utc={reminder_utc.isoformat()} tz={tz_label}",
+                        flush=True,
+                    )
+                    del PENDING_REMINDERS[pending_key]
+                    reply_text = await build_reminder_ack_text(
+                        pending["task"],
+                        reminder_dt,
+                        tz_label,
+                        message.guild,
+                    )
+                    await message.reply(reply_text)
+                    return
+
+    if client.user.mentioned_in(message) and "remind me" in content_lower:
+        task, reminder_dt, reminder_utc, tz_label, error, pending = parse_reminder_request(
+            content_no_mentions,
+            allow_missing_tz=True,
+        )
+        if pending:
+            PENDING_REMINDERS[pending_key] = {
+                **pending,
+                "created_at": datetime.datetime.now(datetime.timezone.utc),
+            }
+            print(
+                "Pending reminder created: user_id="
+                f"{message.author.id} channel_id={message.channel.id} "
+                f"task={pending['task']} time={pending['hour']:02d}:{pending['minute']:02d} "
+                f"rel={pending['rel']} date={pending['date_str']}",
+                flush=True,
+            )
+            await message.reply("Please include a timezone (e.g., GMT, UTC+2, America/New_York).")
+            return
+        if error:
+            await message.reply(error)
+            return
+        REMINDERS.append({
+            "user_id": message.author.id,
+            "channel_id": message.channel.id,
+            "task": task,
+            "when_utc": reminder_utc,
+        })
+        print(
+            "Reminder scheduled: user_id="
+            f"{message.author.id} channel_id={message.channel.id} "
+            f"when_utc={reminder_utc.isoformat()} tz={tz_label}",
+            flush=True,
+        )
+        reply_text = await build_reminder_ack_text(
+            task,
+            reminder_dt,
+            tz_label,
+            message.guild,
+        )
+        await message.reply(reply_text)
+        return
+
     # China/Mao trigger
-    content_lower = message.content.lower()
     china_regex = r"\b(mao|xi|jinping|beijing|shanghai|chairman|kung fu|wushu|dim sum)\b"
     if re.search(china_regex, content_lower):
         if LLM_ENABLED:
-            # check queue size
-            if message_queue.qsize() >= 2:
-                await message.reply("Ladies ladies! one at a time for the Chinese bubster! <:sponge:1416270403923480696>")
-                return
-
             async with message.channel.typing():
                 try:
                     selected_figures_str = get_selected_figures_str(message.guild)
@@ -2145,7 +2658,7 @@ async def on_message(message):
                             for attachment in attachments:
                                 media_notes.append(f"{attachment.filename}: {attachment.url}")
                     media_context = get_media_context(attachments, media_parts, media_notes)
-                    user_content = message.content
+                    user_content = content_no_mentions
                     if media_context:
                         user_content = f"{user_content}\n\n{media_context}"
 
@@ -2210,7 +2723,7 @@ async def on_message(message):
                 # Found relevant frame data! Inject it.
                 replied_context = (
                     f"{coach_instruction}"
-                    f"USER QUERY: {message.content}\n"
+                    f"USER QUERY: {content_no_mentions}\n"
                     f"AVAILABLE DATA:\n{fd_context_data}\n"
                     f"{MOVE_DEFINITIONS}\n"
                     "INSTRUCTION: Use the AVAILABLE DATA to answer the user's question.\n"
@@ -2236,7 +2749,7 @@ async def on_message(message):
             elif fd_context_mode == "combo":
                 replied_context = (
                     f"{coach_instruction}"
-                    f"USER QUERY: {message.content}\n"
+                    f"USER QUERY: {content_no_mentions}\n"
                     f"AVAILABLE DATA:\n{fd_context_data}\n"
                     "INSTRUCTION: Use ONLY the combo/oki data in AVAILABLE DATA.\n"
                     " - Do NOT invent frame data, move inputs, or stats that are not explicitly listed.\n"
@@ -2246,7 +2759,7 @@ async def on_message(message):
             elif fd_context_mode == "overview":
                 replied_context = (
                     f"{coach_instruction}"
-                    f"USER QUERY: {message.content}\n"
+                    f"USER QUERY: {content_no_mentions}\n"
                     f"AVAILABLE DATA:\n{fd_context_data}\n"
                     "INSTRUCTION: Use ONLY the overview text in AVAILABLE DATA.\n"
                     " - Do NOT invent moves, inputs, frame data, or specific anti-air buttons unless they appear in the overview.\n"
@@ -2257,7 +2770,7 @@ async def on_message(message):
             else:
                 replied_context = (
                     f"{coach_instruction}"
-                    f"USER QUERY: {message.content}\n"
+                    f"USER QUERY: {content_no_mentions}\n"
                     f"AVAILABLE DATA:\n{fd_context_data}\n"
                     "INSTRUCTION: Use ONLY the AVAILABLE DATA to answer the user's question."
                 )
@@ -2267,7 +2780,7 @@ async def on_message(message):
             # Still provide a coached response.
              replied_context = (
                 f"{coach_instruction}"
-                f"USER QUERY: {message.content}\n"
+                f"USER QUERY: {content_no_mentions}\n"
                 f"{MOVE_DEFINITIONS}\n"
                 "Answer as a helpful coach."
             )
@@ -2284,7 +2797,9 @@ async def on_message(message):
             if replied_msg.author == client.user:
                 check_media = True # check media on reply
                 is_reply_to_bot = True
-                if "Target Combo Options" in replied_msg.content:
+                if replied_msg.id == LAST_DAILY_VIDEO_ID.get(message.channel.id):
+                    replied_context = "Has anyone improved?"
+                elif "Target Combo Options" in replied_msg.content:
                     replied_context = replied_msg.content  # capture only TC prompt
 
         except discord.NotFound:
@@ -2297,7 +2812,7 @@ async def on_message(message):
     if replied_context and "Target Combo Options" in replied_context:
         match = re.search(r"Target Combo Options \(([^)]+)\)", replied_context)
         char_hint = match.group(1).strip() if match else ""
-        tc_query = message.content.strip()
+        tc_query = content_no_mentions
         if char_hint:
             tc_query = f"{char_hint} {tc_query} framedata"
         else:
@@ -2324,7 +2839,7 @@ async def on_message(message):
         has_gif = any("tenor.com" in str(e.url or "") or "giphy.com" in str(e.url or "") or (e.type == "gifv") for e in message.embeds)
         # check gif links
         if not has_gif:
-            has_gif = "tenor.com" in message.content.lower() or "giphy.com" in message.content.lower() or ".gif" in message.content.lower()
+            has_gif = "tenor.com" in content_lower or "giphy.com" in content_lower or ".gif" in content_lower
         
         # check images
         has_image = any(att.content_type and att.content_type.startswith("image/") for att in message.attachments)
@@ -2335,7 +2850,6 @@ async def on_message(message):
     # llm response (mentioned OR replying to bot)
     should_respond = client.user.mentioned_in(message) or is_reply_to_bot or replied_context is not None
     if should_respond:
-        content_no_mentions = re.sub(r'<@!?[0-9]+>', '', message.content).strip()
         prompt = content_no_mentions
         media_parts = []
         media_notes = []
@@ -2354,16 +2868,12 @@ async def on_message(message):
             )
             return
         if has_prompt_or_media and LLM_ENABLED:
-             if message_queue.qsize() >= 2:
-                 await message.reply("Ladies ladies! one at a time for the Chinese bubster! <:sponge:1416270403923480696>")
-                 return
-             
              try:
                 # fetch context
                 context_history = []
                 async for prev_msg in message.channel.history(limit=5, before=message):
                     # store reversed
-                    msg_text = f"{prev_msg.author.display_name}: {prev_msg.content}"
+                    msg_text = f"{prev_msg.author.display_name}: {strip_discord_mentions(prev_msg.content)}"
                     context_history.append(msg_text)
                 
                 # oldest -> newest
