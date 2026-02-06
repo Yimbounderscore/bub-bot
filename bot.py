@@ -43,6 +43,11 @@ DAILY_VIDEO_URL = (
     "https://cdn.discordapp.com/attachments/1345474577316319265/1467924199996915918/l3.mp4?ex=69822671&is=6980d4f1&hm=7e1208fa08199a25f9cac3dc8132696f2a9374fac61bfb2b5ae75e31f6695bea&"
 )
 VIDEO_ENCOURAGEMENT_DELAY_SECONDS = int(os.getenv('VIDEO_ENCOURAGEMENT_DELAY_SECONDS', '120'))
+DAILY_ENCOURAGEMENT_MESSAGES = 5
+ENCOURAGEMENT_PROMPT = (
+    "Send a short, general encouragement to the channel about improvement or a personal anecdote about yourself. The anecdote does not strictly have to be about improvement "
+    "One sentence. Calm, pragmatic, nonchalant."
+)
 
 REMINDER_POLL_SECONDS = int(os.getenv('REMINDER_POLL_SECONDS', '10'))
 REMINDER_PENDING_TTL_SECONDS = int(os.getenv('REMINDER_PENDING_TTL_SECONDS', '600'))
@@ -2331,35 +2336,53 @@ async def send_daily_messages(channel):
     print("Messages dispatched successfully.")
 
 
+async def send_generated_encouragement(channel, source_label="scheduled"):
+    if not LLM_ENABLED:
+        print(f"{source_label.capitalize()} encouragement skipped: LLM disabled.", flush=True)
+        return
+
+    selected_figures_str = get_selected_figures_str(channel.guild)
+    llm_messages = [
+        {
+            "role": "system",
+            "content": IMPROVEMENT_PROMPT.format(selected_figures_str=selected_figures_str),
+        },
+        {"role": "user", "content": ENCOURAGEMENT_PROMPT},
+    ]
+    try:
+        reply_text = await get_llm_response(llm_messages)
+        await channel.send(reply_text)
+        print(
+            f"{source_label.capitalize()} encouragement sent at {datetime.datetime.now().isoformat()}",
+            flush=True,
+        )
+    except Exception as e:
+        print(f"{source_label.capitalize()} encouragement error: {e}", flush=True)
+
+
+def get_daily_random_slots(day_start, count):
+    second_slots = sorted(random.sample(range(86400), count))
+    return [day_start + datetime.timedelta(seconds=slot) for slot in second_slots]
+
+
 async def send_video_with_encouragement(channel):
     """Send the video now and a short encouragement later."""
     global LAST_DAILY_VIDEO_ID
+    print(f"Dispatching daily video at {datetime.datetime.now().isoformat()}", flush=True)
     try:
         sent_msg = await channel.send(DAILY_VIDEO_URL)
         LAST_DAILY_VIDEO_ID[channel.id] = sent_msg.id
     except Exception as e:
         print(f"Daily video error: {e}")
         return
+    print(f"Daily video dispatched successfully at {datetime.datetime.now().isoformat()}", flush=True)
 
     if not LLM_ENABLED:
         return
 
     async def delayed_encouragement():
         await asyncio.sleep(VIDEO_ENCOURAGEMENT_DELAY_SECONDS)
-        encouragement_prompt = (
-            "Send a short, general encouragement to the channel about improvement. "
-            "One sentence. Calm, pragmatic, nonchalant."
-        )
-        selected_figures_str = get_selected_figures_str(channel.guild)
-        llm_messages = [
-            {"role": "system", "content": IMPROVEMENT_PROMPT.format(selected_figures_str=selected_figures_str)},
-            {"role": "user", "content": encouragement_prompt},
-        ]
-        try:
-            reply_text = await get_llm_response(llm_messages)
-            await channel.send(reply_text)
-        except Exception as e:
-            print(f"Daily encouragement error: {e}")
+        await send_generated_encouragement(channel, source_label="daily video")
 
     client.loop.create_task(delayed_encouragement())
 
@@ -2376,45 +2399,34 @@ async def background_task():
         print(f"Could not find channel with ID {CHANNEL_ID}")
         return
 
-    print("Bot is ready and scheduling started.")
-
-    # calc target time
-    now = datetime.datetime.now()
-    start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    random_seconds = random.randint(0, 86399)
-    target_time = start_of_day + datetime.timedelta(seconds=random_seconds)
-
-    # schedule for tomorrow if passed
-    if target_time < now:
-        start_of_tomorrow = start_of_day + datetime.timedelta(days=1)
-        random_seconds = random.randint(0, 86399)
-        target_time = start_of_tomorrow + datetime.timedelta(seconds=random_seconds)
-        print(f"Daily slot elapsed. Scheduling for next cycle at {target_time}", flush=True)
-    else:
-        print(f"Scheduling for current cycle at {target_time}", flush=True)
-    
-    NEXT_RUN_TIME = target_time
+    print("Bot is ready and encouragement scheduling started.", flush=True)
 
     while not client.is_closed():
         now = datetime.datetime.now()
-        wait_seconds = (target_time - now).total_seconds()
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_slots = get_daily_random_slots(day_start, DAILY_ENCOURAGEMENT_MESSAGES)
+        remaining_slots = [slot for slot in day_slots if slot > now]
 
-        if wait_seconds > 0:
-            # sleep until target
-            await asyncio.sleep(wait_seconds)
+        if not remaining_slots:
+            day_start = day_start + datetime.timedelta(days=1)
+            remaining_slots = get_daily_random_slots(day_start, DAILY_ENCOURAGEMENT_MESSAGES)
 
-        # dispatch messages
-        await send_daily_messages(channel)
-        
-        # schedule next run
-        now_after_run = datetime.datetime.now()
-        start_of_next_day = now_after_run.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(days=1)
-        random_seconds_next = random.randint(0, 86399)
-        target_time = start_of_next_day + datetime.timedelta(seconds=random_seconds_next)
-        
-        print(f"Run complete. Next run scheduled for {target_time}", flush=True)
+        slot_log = ", ".join(slot.strftime("%H:%M:%S") for slot in remaining_slots)
+        print(
+            f"Encouragement slots for {day_start.date()}: {slot_log}",
+            flush=True,
+        )
 
-        NEXT_RUN_TIME = target_time
+        for slot_time in remaining_slots:
+            NEXT_RUN_TIME = slot_time
+            wait_seconds = (slot_time - datetime.datetime.now()).total_seconds()
+            if wait_seconds > 0:
+                await asyncio.sleep(wait_seconds)
+            if client.is_closed():
+                return
+            await send_generated_encouragement(channel, source_label="scheduled")
+
+        NEXT_RUN_TIME = None
 
 
 async def background_video_task():
