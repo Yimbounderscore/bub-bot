@@ -48,6 +48,12 @@ ENCOURAGEMENT_PROMPT = (
     "Send a short, general encouragement to the channel about improvement or a personal anecdote about yourself. The anecdote does not strictly have to be about improvement "
     "One sentence. Calm, pragmatic, nonchalant."
 )
+DELETED_MESSAGE_FAILSAFE_PROMPT = (
+    "A user tried to silence Chinese Bub by deleting their mention before a reply. "
+    "Respond with one short sentence about how futile it is to try to kill or escape Chinese Bub. "
+    "Tone: smug, playful, in-character."
+)
+DELETED_MESSAGE_FAILSAFE_FALLBACK = "you can never escape me with your puny attempts."
 
 REMINDER_POLL_SECONDS = int(os.getenv('REMINDER_POLL_SECONDS', '10'))
 REMINDER_PENDING_TTL_SECONDS = int(os.getenv('REMINDER_PENDING_TTL_SECONDS', '600'))
@@ -2497,6 +2503,41 @@ reminder_task_handle = None
 web_server_task = None
 LAST_DAILY_VIDEO_ID = {}
 
+
+async def send_deleted_message_failsafe(channel):
+    reply_text = DELETED_MESSAGE_FAILSAFE_FALLBACK
+    if LLM_ENABLED:
+        try:
+            selected_figures_str = get_selected_figures_str(channel.guild)
+            llm_messages = [
+                {
+                    "role": "system",
+                    "content": SYSTEM_PROMPT.format(selected_figures_str=selected_figures_str),
+                },
+                {
+                    "role": "user",
+                    "content": DELETED_MESSAGE_FAILSAFE_PROMPT,
+                },
+            ]
+            reply_text = await get_llm_response(llm_messages)
+        except Exception as e:
+            print(f"Deleted-message failsafe LLM error: {e}", flush=True)
+    try:
+        await channel.send(reply_text)
+        print("Deleted-message failsafe sent.", flush=True)
+    except Exception as e:
+        print(f"Deleted-message failsafe error: {e}", flush=True)
+
+
+def is_deleted_message_reference_error(error):
+    if isinstance(error, discord.NotFound):
+        return True
+    if isinstance(error, discord.HTTPException):
+        text = str(error).lower()
+        if "message_reference" in text and "unknown message" in text:
+            return True
+    return False
+
 async def worker():
     print("Worker started...")
     while True:
@@ -2521,14 +2562,28 @@ async def worker():
 
             async with message.channel.typing():
                 reply_text = await get_llm_response(llm_messages, enable_search=enable_search)
-                await message.reply(reply_text)
+                try:
+                    await message.reply(reply_text)
+                except Exception as reply_error:
+                    if is_deleted_message_reference_error(reply_error):
+                        print("Worker reply target deleted before send. Triggering failsafe.", flush=True)
+                        await send_deleted_message_failsafe(message.channel)
+                    else:
+                        raise
         except Exception as e:
             print(f"Worker error: {e}")
             error_detail = str(e)
-            if fallback_reply:
-                await message.reply(f"{fallback_reply}\n\nLLM error: {error_detail}")
-            else:
-                await message.reply(f"LLM error: {error_detail}")
+            try:
+                if fallback_reply:
+                    await message.reply(f"{fallback_reply}\n\nLLM error: {error_detail}")
+                else:
+                    await message.reply(f"LLM error: {error_detail}")
+            except Exception as reply_error:
+                if is_deleted_message_reference_error(reply_error):
+                    print("Worker error reply target deleted. Triggering failsafe.", flush=True)
+                    await send_deleted_message_failsafe(message.channel)
+                    continue
+                print(f"Worker fallback reply error: {reply_error}", flush=True)
         finally:
             message_queue.task_done()
 
@@ -2589,10 +2644,6 @@ async def on_message(message):
         return
 
     
-    if "gay" in content_lower:
-        await message.reply("Yes absolutely")
-        return
-
     if "clanker" in content_lower:
         await message.reply("please can we not say slurs thanks <:sponge:1416270403923480696>")
         return
@@ -2718,48 +2769,6 @@ async def on_message(message):
         )
         await message.reply(reply_text)
         return
-
-    # China/Mao trigger
-    china_regex = r"\b(mao|xi|jinping|beijing|shanghai|chairman|kung fu|wushu|dim sum)\b"
-    if re.search(china_regex, content_lower):
-        if LLM_ENABLED:
-            async with message.channel.typing():
-                try:
-                    selected_figures_str = get_selected_figures_str(message.guild)
-                    media_parts = []
-                    media_notes = []
-                    attachments = await get_message_media_items(message)
-                    if attachments:
-                        if GEMINI_ENABLED:
-                            media_parts, media_notes = await build_message_media_parts(attachments)
-                        else:
-                            for attachment in attachments:
-                                media_notes.append(f"{attachment.filename}: {attachment.url}")
-                    media_context = get_media_context(attachments, media_parts, media_notes)
-                    user_content = content_no_mentions
-                    if media_context:
-                        user_content = f"{user_content}\n\n{media_context}"
-
-                    # construct LLM messages
-                    messages = [
-                        {"role": "system", "content": SYSTEM_PROMPT.format(selected_figures_str=selected_figures_str)},
-                        {
-                            "role": "user",
-                            "content": user_content,
-                            "parts": (
-                                ([{"text": user_content}] if user_content else [])
-                                + media_parts
-                                + ([{"text": f"Media notes: {'; '.join(media_notes)}"}] if media_notes else [])
-                            ),
-                        }
-                    ]
-                    
-                    # push to queue instead of calling directly
-                    await message_queue.put((message, messages, None))
-
-                except Exception as e:
-                    print(f"China praise error: {e}")
-            return
 
     # logic flags
     check_media = False
