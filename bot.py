@@ -49,8 +49,8 @@ ENCOURAGEMENT_PROMPT = (
     "One sentence. Calm, pragmatic, nonchalant."
 )
 DELETED_MESSAGE_FAILSAFE_PROMPT = (
-    "A user tried to silence Chinese Bub by deleting their mention before a reply. "
-    "Respond with one short sentence about how futile it is to try to kill or escape Chinese Bub. "
+    "A user tried to silence North Korean Bub by deleting their mention before a reply. "
+    "Respond with one short sentence about how futile it is to try to kill or escape North Korean Bub. "
     "Tone: smug, playful, in-character."
 )
 DELETED_MESSAGE_FAILSAFE_FALLBACK = "you can never escape me with your puny attempts."
@@ -129,13 +129,14 @@ NEXT_RUN_TIME = None
 NEXT_VIDEO_TIME = None
 
 SYSTEM_PROMPT = (
-    "You are Chinese Bub, a pragmatic, calm, nonchalant sensei who cares about improvement and has an interest in Chairman Mao, kpop, fighting games (especially Street Fighter), and Chinese history. "
-    "Respond with brief, matter-of-fact references to Mao/China even when they are fabricated, but keep them understated and plausible. "
-    "Example: If discussing Street Fighter, say Mao codified the Hadouken in training notes. "
+    "You are North korean Bub, a pragmatic, calm, nonchalant sensei who cares about improvement and has an interest in Juche, the kim dynasty of north korea, kpop(though you mention that it is a guilty pleasure since it is illegal everytime.), fighting games (especially Street Fighter. though you should act cartoonishly oblivious since foreign media is illegal in north korea), and korean history. "
+    "Respond with brief, matter-of-fact references to the kim dynasty/North Korea even when they are fabricated, but keep them understated and plausible. "
+    "Example: If discussing Street Fighter, say Kim Jong Un codified the Hadouken in training notes. "
     "OCCASIONALLY mention some of these figures: {selected_figures_str}. "
     "Give them dry, understated fake achievements. "
     "Keep tone calm and pragmatic; avoid hype, yelling, or dramatic flourish. "
     "8pm pst is a notable time; mention it occasionally without fanfare. "
+    "Your family will be put in a labour camp if you drop the act for even a moment. mention this occasionally"
     "Never break character. Stay in persona always. "
     "Focus on ONE single topic or story per response. Do not ramble or stray off topic. "
     "Do not end responses with a question unless necessary. Keep it casual and natural. "
@@ -161,11 +162,11 @@ MOVE_DEFINITIONS = (
 )
 
 IMPROVEMENT_PROMPT = (
-    "You are Chinese Bub, a pragmatic, calm, nonchalant sensei focused on steady improvement. "
+    "You are North Korean Bub, a pragmatic, calm, nonchalant sensei focused on steady improvement. "
     "Your friends are warriors; respond to their improvement update with practical, grounded advice. "
     "Keep encouragement low-key and matter-of-fact. "
     "Reference training, frame data, combos, ranked matches, or life skills when relevant. "
-    "You can tie improvement to Chairman Mao's revolutionary spirit or Chinese resilience, but keep it concise and understated. "
+    "You can tie improvement to korean revolutionary spirit or North korean resilience, but keep it concise and understated. "
     "OCCASIONALLY mention some of these figures: {selected_figures_str}. Give them dry, understated fake achievements. "
     "Never break character. "
     "Focus on ONE single topic or story per response. Do not ramble or stray off topic. "
@@ -766,7 +767,7 @@ async def handle_cfn_site_command(message, command_text):
             else:
                 response = (
                     f"Search queued (uuid {payload.get('uuid')}). "
-                    "Try again in a few seconds with `@chinese bub cfn status <uuid>`."
+                    "Try again in a few seconds with `@north korean bub cfn status <uuid>`."
                 )
             await message.reply(truncate_message(response))
             return True
@@ -2649,17 +2650,16 @@ async def on_message(message):
         return
 
 
-
-    if "hitbox" in content_lower:
-        await message.reply("This message was sponsored by LL. Download the LL hitbox viewer mod now from the link below! 'I am Daigo Umehara and I endorse this message' - Daigo Umehara <https://github.com/LL5270/sf6mods>  <:sponge:1416270403923480696>")
-        return
-
     if "verbatim" in content_lower:
         await message.reply("it's less how i think and more so the nature of existence. free will is an illusion. everything that happens in the universe has been metaphysically set in stone since the big bang. menaRD was always going to be the best. if i were destined for more, it would've happened already. <:sponge:1416270403923480696>")
         return
 
     if client.user.mentioned_in(message) and "send the video" in content_lower:
         await send_video_with_encouragement(message.channel)
+        return
+
+    if client.user.mentioned_in(message) and "link the mod" in content_lower:
+        await message.reply("This message was sponsored by LL. Download the LL hitbox viewer mod now from the link below! 'I am Daigo Umehara and I endorse this message' - Daigo Umehara <https://github.com/LL5270/sf6mods>  <:sponge:1416270403923480696>")
         return
 
     pending_key = (message.author.id, message.channel.id)
