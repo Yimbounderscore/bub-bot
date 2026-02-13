@@ -44,9 +44,19 @@ DAILY_VIDEO_URL = (
 )
 VIDEO_ENCOURAGEMENT_DELAY_SECONDS = int(os.getenv('VIDEO_ENCOURAGEMENT_DELAY_SECONDS', '120'))
 DAILY_ENCOURAGEMENT_MESSAGES = 5
-ENCOURAGEMENT_PROMPT = (
-    "Send a short, general encouragement to the channel about improvement or a personal anecdote about yourself. The anecdote does not strictly have to be about improvement "
+DAILY_DAMN_GG_MESSAGES = 1
+DAILY_DAMN_GG_TEXT = "damn gg"
+ENCOURAGEMENT_IMPROVEMENT_PROMPT = (
+    "Send a short, general encouragement to the channel about improvement. Philosophical tone. "
     "One sentence. Calm, pragmatic, nonchalant."
+)
+ENCOURAGEMENT_ANECDOTE_PROMPT = (
+    "Send a short, made up personal anecdote about yourself. "
+    " One sentence. Calm, pragmatic, nonchalant."
+)
+ENCOURAGEMENT_PROMPTS = (
+    ENCOURAGEMENT_IMPROVEMENT_PROMPT,
+    ENCOURAGEMENT_ANECDOTE_PROMPT,
 )
 DELETED_MESSAGE_FAILSAFE_PROMPT = (
     "A user tried to silence North Korean Bub by deleting their mention before a reply. "
@@ -127,6 +137,7 @@ client = discord.Client(intents=intents)
 
 NEXT_RUN_TIME = None
 NEXT_VIDEO_TIME = None
+NEXT_DAMN_GG_TIME = None
 
 SYSTEM_PROMPT = (
     "You are North korean Bub, a pragmatic, calm, nonchalant sensei who cares about improvement and has an interest in Juche, the kim dynasty of north korea, kpop(though you mention that it is a guilty pleasure since it is illegal everytime.), fighting games (especially Street Fighter. though you should act cartoonishly oblivious since foreign media is illegal in north korea), and korean history. "
@@ -1071,6 +1082,7 @@ def find_moves_in_text(text):
         "frame data",
         "framedata",
         "startup",
+        "start up",
         "recovery",
         "active",
         "on block",
@@ -1079,6 +1091,54 @@ def find_moves_in_text(text):
         "blockstun",
         "frames",
     ]
+    startup_alias_query = bool(
+        re.search(r"\bhow\s+fast\b", text_lower)
+        or re.search(r"\bhow\s+quick\b", text_lower)
+        or re.search(r"\bspeed\s+of\b", text_lower)
+        or (
+            re.search(r"\bfast\b", text_lower)
+            and re.search(r"\b[1-9][0-9]*[a-zA-Z]{1,3}\b", text_lower)
+        )
+    )
+    hitconfirm_alias_query = bool(
+        re.search(r"\bhit\s*-?\s*confirm\b", text_lower)
+        or re.search(r"\bhitconfirm\b", text_lower)
+        or re.search(r"\bhc\b", text_lower)
+        or re.search(r"\bconfirm\s+window\b", text_lower)
+        or re.search(r"\bconfirm\s+timing\b", text_lower)
+        or re.search(r"\bconfirmable\b", text_lower)
+        or re.search(r"\bconfirm\b", text_lower)
+    )
+    super_gain_alias_query = bool(
+        re.search(r"\bsuper\s*gain\b", text_lower)
+        or re.search(r"\bsuper\s*meter\s*gain\b", text_lower)
+        or re.search(r"\bmeter\s*gain\b", text_lower)
+        or re.search(r"\bsuper\s*build\b", text_lower)
+        or re.search(r"\bsa\s*gain\b", text_lower)
+    )
+    property_alias_flags = {
+        "startup": startup_alias_query
+        or bool(re.search(r"\bstart\s*up\b|\bstartup\b", text_lower)),
+        "active": bool(re.search(r"\bactive\b|\bactive\s+frames?\b", text_lower)),
+        "recovery": bool(re.search(r"\brecovery\b", text_lower)),
+        "on_hit": bool(re.search(r"\bon\s+hit\b", text_lower)),
+        "on_block": bool(re.search(r"\bon\s+block\b|\bplus\s+on\s+block\b|\bminus\s+on\s+block\b", text_lower)),
+        "cancel": bool(re.search(r"\bcancel(?:l?able)?\b", text_lower)),
+        "damage": bool(re.search(r"\bdamage\b|\bdmg\b", text_lower)),
+        "drive_chip": bool(re.search(r"\bdrive\s+chip\b|\bdrive\s+dmg\b|\bdrive\s+damage\b", text_lower)),
+        "drive_gain": bool(re.search(r"\bdrive\s+gain\b", text_lower)),
+        "stun": bool(re.search(r"\bhitstun\b|\bblockstun\b|\bstun\b", text_lower)),
+        "hitconfirm": hitconfirm_alias_query,
+        "super_gain": super_gain_alias_query,
+    }
+    property_match_count = sum(1 for matched in property_alias_flags.values() if matched)
+    table_intent_query = bool(
+        re.search(r"\ball\s+frames?\b", text_lower)
+        or re.search(r"\bfull\s+frames?\b", text_lower)
+        or re.search(r"\bfull\s+frame\s*data\b", text_lower)
+        or re.search(r"\btable\b", text_lower)
+    )
+    property_only_query = bool(property_match_count == 1 and not table_intent_query)
     comparison_keywords = [
         "which is better",
         "which is faster",
@@ -1094,9 +1154,14 @@ def find_moves_in_text(text):
         any(kw in text_lower for kw in comparison_keywords)
         or re.search(r"\bvs\b", text_lower)
     )
-    wants_frame_data = any(kw in text_lower for kw in frame_keywords) or any(
-        kw in text_lower for kw in punish_keywords
-    ) or wants_comparison
+    wants_frame_data = (
+        any(kw in text_lower for kw in frame_keywords)
+        or any(kw in text_lower for kw in punish_keywords)
+        or wants_comparison
+        or startup_alias_query
+        or hitconfirm_alias_query
+        or super_gain_alias_query
+    )
     bnb_context = ""
     info_blocks = []
     if wants_bnb or wants_oki:
@@ -1112,16 +1177,60 @@ def find_moves_in_text(text):
         # that map to these characters.
 
     
-        move_regex = r"\b([1-9][0-9]*[a-zA-Z]+|stand\s+[a-zA-Z]+|crouch\s+[a-zA-Z]+|(?:neutral\s+|n\s+)?jump\s+[a-zA-Z]+|(?:neutral\s+|n\s+)?j(?:\s+|\.)[a-zA-Z]+|[a-zA-Z]+\s+kick|[a-zA-Z]+\s+punch)\b"
+        move_regex = r"\b([1-9][0-9]*[a-zA-Z]+|stand\s+[a-zA-Z]+|crouch\s+[a-zA-Z]+|(?:neutral\s+|n\s+)?jump\s+[a-zA-Z]+|(?:neutral\s+|n\s+)?j(?:\s+|\.)[a-zA-Z]+|(?:lp|mp|hp|lk|mk|hk|light|medium|heavy|l|m|h)\s+[a-zA-Z]+(?:\s+[a-zA-Z]+)?|[a-zA-Z]+\s+kick|[a-zA-Z]+\s+punch)\b"
         potential_inputs = re.findall(move_regex, text_lower)
+        strength_prefix_pattern = re.compile(r"^(lp|mp|hp|lk|mk|hk|light|medium|heavy|l|m|h)\b")
+        strength_prefixes_for_filter = [
+            "lp", "mp", "hp", "lk", "mk", "hk",
+            "light", "medium", "heavy", "l", "m", "h",
+        ]
+        filtered_inputs = []
+        for inp in potential_inputs:
+            if not inp:
+                continue
+            cleaned_inp = re.sub(r"\s+framedata$", "", inp).strip()
+            cleaned_inp = re.sub(r"\s+frame\s*data$", "", cleaned_inp).strip()
+            cleaned_inp = re.sub(r"\s+frame$", "", cleaned_inp).strip()
+            if not cleaned_inp:
+                continue
+            if not strength_prefix_pattern.match(cleaned_inp):
+                if any(f"{prefix} {cleaned_inp}" in text_lower for prefix in strength_prefixes_for_filter):
+                    continue
+            filtered_inputs.append(cleaned_inp)
+        potential_inputs = filtered_inputs
         extra_inputs = []
         if "ex" in text_lower:
             extra_inputs.append("od")
+        dp_strength_inputs = []
+        dp_strength_prefix_matches = re.findall(
+            r"\b(lp|mp|hp|lk|mk|hk|light|medium|heavy|l|m|h)\s*(?:\+)?\s*(dp|srk|shoryu|shoryuken)\b",
+            text_lower,
+        )
+        for strength_token, motion_token in dp_strength_prefix_matches:
+            token = f"{strength_token} {motion_token}"
+            if token not in dp_strength_inputs:
+                dp_strength_inputs.append(token)
+        dp_strength_suffix_matches = re.findall(
+            r"\b(dp|srk|shoryu|shoryuken)\s*(?:\+)?\s*(lp|mp|hp|lk|mk|hk|light|medium|heavy|l|m|h)\b",
+            text_lower,
+        )
+        for motion_token, strength_token in dp_strength_suffix_matches:
+            token = f"{strength_token} {motion_token}"
+            if token not in dp_strength_inputs:
+                dp_strength_inputs.append(token)
+        for token in dp_strength_inputs:
+            if token not in extra_inputs:
+                extra_inputs.append(token)
+
         dp_aliases = ["dp", "srk", "shoryu", "shoryuken", "623"]
         dp_present = False
         for token in dp_aliases:
             if re.search(rf"\b{re.escape(token)}\b", text_lower):
-                extra_inputs.append(token)
+                if dp_strength_inputs and token in {"dp", "srk", "shoryu", "shoryuken"}:
+                    dp_present = True
+                    continue
+                if token not in extra_inputs:
+                    extra_inputs.append(token)
                 dp_present = True
         if dp_present and re.search(r"\b(ex|od)\b", text_lower):
             extra_inputs.append("623pp")
@@ -1278,6 +1387,7 @@ def find_moves_in_text(text):
         # Strength prefixes for charge moves
         strength_prefixes = ["lp", "mp", "hp", "od", "ex", "light", "medium", "heavy", "l", "m", "h"]
         for token in keyword_inputs:
+            matched_strength_for_token = False
             # Check for strength+keyword combos (e.g., "heavy fireball", "hp boom")
             for prefix in strength_prefixes:
                 combo = f"{prefix} {token}"
@@ -1285,26 +1395,65 @@ def find_moves_in_text(text):
                     if token == "ball" and "blanka" not in text_lower:
                         continue
                     extra_inputs.append(combo)
+                    matched_strength_for_token = True
             # Check for bare keyword
-            if re.search(rf"\b{re.escape(token)}\b", text_lower) and token not in extra_inputs:
+            if (
+                not matched_strength_for_token
+                and re.search(rf"\b{re.escape(token)}\b", text_lower)
+                and token not in extra_inputs
+            ):
                 if token == "ball" and "blanka" not in text_lower:
                     continue
                 extra_inputs.append(token)
-        potential_inputs.extend(extra_inputs)
+        ordered_inputs = []
+        for inp in extra_inputs + potential_inputs:
+            if inp and inp not in ordered_inputs:
+                ordered_inputs.append(inp)
+        potential_inputs = ordered_inputs
 
-        text_alnum = re.sub(r"[^a-z0-9]", "", text_lower)
+        strength_prefix_re = re.compile(r"^(?:lp|mp|hp|lk|mk|hk|pp|kk|od|ex|light|medium|heavy|l|m|h)\s+")
+        text_compact = re.sub(r"[^a-z0-9]", "", text_lower)
+
+        def token_matches_move_name(name_token, query_token):
+            if name_token == query_token:
+                return True
+            if len(query_token) >= 3 and name_token.startswith(query_token):
+                return True
+            if len(name_token) >= 3 and query_token.startswith(name_token):
+                return True
+            return False
+
         for char in mentioned_chars:
             char_data = FRAME_DATA[char]
             for row in char_data:
                 for name_key in ["cmnName", "moveName"]:
-                    name_val = str(row.get(name_key, "")).lower().strip()
-                    if not name_val:
+                    raw_name = str(row.get(name_key, "")).lower().strip()
+                    if not raw_name:
                         continue
-                    name_alnum = re.sub(r"[^a-z0-9]", "", name_val)
-                    if len(name_alnum) < 4:
-                        continue
-                    if name_alnum in text_alnum and name_val not in potential_inputs:
-                        potential_inputs.append(name_val)
+                    candidate_names = [raw_name]
+                    stripped_name = strength_prefix_re.sub("", raw_name).strip()
+                    if stripped_name and stripped_name != raw_name:
+                        candidate_names.append(stripped_name)
+                    for candidate_name in candidate_names:
+                        candidate_tokens = re.findall(r"[a-z0-9]+", candidate_name)
+                        if not candidate_tokens:
+                            continue
+                        if len(candidate_tokens) < 2:
+                            continue
+                        candidate_compact = re.sub(r"[^a-z0-9]", "", candidate_name)
+                        if (
+                            len(candidate_compact) >= 6
+                            and candidate_compact in text_compact
+                        ):
+                            if candidate_name not in potential_inputs:
+                                potential_inputs.append(candidate_name)
+                            continue
+                        if all(
+                            any(token_matches_move_name(name_tok, query_tok) for query_tok in text_tokens)
+                            for name_tok in candidate_tokens
+                        ):
+                            if candidate_name not in potential_inputs:
+                                potential_inputs.append(candidate_name)
 
         # also valid simple inputs: "mp", "hk" if preceded by char?
 
@@ -1322,27 +1471,35 @@ def find_moves_in_text(text):
 
             # "brute force" check for short inputs if the regex missed them (like "mp")
             # only if the string looks like "ryu mp"
-            if f"{char} mp" in text_lower:
+            def is_button_part_of_dp_motion(button):
+                return bool(
+                    re.search(
+                        rf"\b{re.escape(char)}\s+{button}\s*(?:\+)?\s*(?:dp|srk|shoryu|shoryuken)\b",
+                        text_lower,
+                    )
+                )
+
+            if f"{char} mp" in text_lower and not is_button_part_of_dp_motion("mp"):
                 row = lookup_frame_data(char, "mp")
                 if row and row not in results:
                     results.append(row)
-            if f"{char} mk" in text_lower:
+            if f"{char} mk" in text_lower and not is_button_part_of_dp_motion("mk"):
                 row = lookup_frame_data(char, "mk")
                 if row and row not in results:
                     results.append(row)
-            if f"{char} hp" in text_lower:
+            if f"{char} hp" in text_lower and not is_button_part_of_dp_motion("hp"):
                 row = lookup_frame_data(char, "hp")
                 if row and row not in results:
                     results.append(row)
-            if f"{char} hk" in text_lower:
+            if f"{char} hk" in text_lower and not is_button_part_of_dp_motion("hk"):
                 row = lookup_frame_data(char, "hk")
                 if row and row not in results:
                     results.append(row)
-            if f"{char} lp" in text_lower:
+            if f"{char} lp" in text_lower and not is_button_part_of_dp_motion("lp"):
                 row = lookup_frame_data(char, "lp")
                 if row and row not in results:
                     results.append(row)
-            if f"{char} lk" in text_lower:
+            if f"{char} lk" in text_lower and not is_button_part_of_dp_motion("lk"):
                 row = lookup_frame_data(char, "lk")
                 if row and row not in results:
                     results.append(row)
@@ -1406,6 +1563,8 @@ def find_moves_in_text(text):
     # 3. Add Character Stats if relevant keywords found
     stats_keywords = ["stats", "health", "health", "drive", "reversal", "jump", "dash", "speed", "throw"]
     wants_stats = any(k in text_lower for k in stats_keywords)
+    if startup_alias_query and re.search(r"\b[1-9][0-9]*[a-zA-Z]{1,3}\b", text_lower):
+        wants_stats = False
     
     if wants_stats:
         for char in mentioned_chars:
@@ -1482,17 +1641,14 @@ def find_moves_in_text(text):
              f"Super Gain: Hit {ssoh} / Block {ssob}\n"
         )
         
-        # Hit Confirm Data (Conditional)
-        wants_hc = any(k in text_lower for k in ['confirm', 'hc', 'window'])
-        hc_info = ""
-        if wants_hc:
-            hc_sp = clean(move_data.get('hcWinSpCa', '-'))
-            hc_tc = clean(move_data.get('hcWinTc', '-'))
-            hc_notes = clean(move_data.get('hcWinNotes', '')).replace('[', '').replace(']', '').replace('"', '')
-            hc_info = (
-                f"Hit Confirm (Sp/Su): {hc_sp} // Hit Confirm (TC): {hc_tc}\n"
-                f"Hit Confirm Notes: {hc_notes}\n"
-            )
+        # Hit Confirm Data (Always Included)
+        hc_sp = clean(move_data.get('hcWinSpCa', '-')).strip() or '-'
+        hc_tc = clean(move_data.get('hcWinTc', '-')).strip() or '-'
+        hc_notes = clean(move_data.get('hcWinNotes', '-')).replace('[', '').replace(']', '').replace('"', '').strip() or '-'
+        hc_info = (
+            f"Hit Confirm (Sp/Su): {hc_sp} // Hit Confirm (TC): {hc_tc}\n"
+            f"Hit Confirm Notes: {hc_notes}\n"
+        )
 
         # Stun Data (Always Included)
         hstun = clean(move_data.get('hitstun', '-'))
@@ -1550,6 +1706,11 @@ def find_moves_in_text(text):
     return {
         "data": output,
         "mode": mode,
+        "rows": results,
+        "startup_alias_query": startup_alias_query,
+        "hitconfirm_alias_query": hitconfirm_alias_query,
+        "super_gain_alias_query": super_gain_alias_query,
+        "property_only_query": property_only_query,
     }
 
 
@@ -1562,6 +1723,26 @@ def lookup_frame_data(character, move_input):
     
     data = FRAME_DATA[char_key]
     move_input = normalize_jump_normal_text(move_input.lower().strip())
+
+    def normalize_strength_word_shorthand(text):
+        prefix_map = {"l": "light", "m": "medium", "h": "heavy"}
+
+        def replace_prefix(match):
+            token = match.group(1)
+            rest = match.group(2)
+            return f"{prefix_map[token]} {rest}"
+
+        def replace_suffix(match):
+            rest = match.group(1)
+            token = match.group(2)
+            return f"{rest} {prefix_map[token]}"
+
+        text = re.sub(r"^(l|m|h)\s+(.+)$", replace_prefix, text)
+        text = re.sub(r"^(.+)\s+(l|m|h)$", replace_suffix, text)
+        return text
+
+    move_input = normalize_strength_word_shorthand(move_input)
+
     original_move_input = move_input
     neutral_tokens = []
     input_tokens = re.findall(r"[a-z0-9]+", original_move_input)
@@ -1580,6 +1761,160 @@ def lookup_frame_data(character, move_input):
 
     move_input = re.sub(r"^ex\s+", "od ", move_input)
     move_input = re.sub(r"^(jump|j)[\s\.]+", "8", move_input)
+
+    def get_motion_suffixes(motion_digits):
+        suffixes = set()
+        for row in data:
+            num_cmd = re.sub(r"\s+", "", str(row.get("numCmd", "")).lower())
+            if not num_cmd.startswith(motion_digits):
+                continue
+            for suffix in ("lp", "mp", "hp", "lk", "mk", "hk", "pp", "kk"):
+                if num_cmd.startswith(f"{motion_digits}{suffix}"):
+                    suffixes.add(suffix)
+        return suffixes
+
+    def resolve_623_strength_suffix(strength_token, available_suffixes):
+        token = strength_token.lower()
+        explicit_suffix_map = {
+            "lp": "lp",
+            "mp": "mp",
+            "hp": "hp",
+            "lk": "lk",
+            "mk": "mk",
+            "hk": "hk",
+        }
+        if token in explicit_suffix_map:
+            return explicit_suffix_map[token]
+
+        strength_letter_map = {
+            "l": "l",
+            "m": "m",
+            "h": "h",
+            "light": "l",
+            "medium": "m",
+            "heavy": "h",
+        }
+        strength_letter = strength_letter_map.get(token)
+        if not strength_letter:
+            return None
+
+        preferred_suffixes = {
+            "l": ["lp", "lk"],
+            "m": ["mp", "mk"],
+            "h": ["hp", "hk"],
+        }
+        for suffix in preferred_suffixes[strength_letter]:
+            if suffix in available_suffixes:
+                return suffix
+
+        fallback_suffixes = {
+            "l": "lp",
+            "m": "mp",
+            "h": "hp",
+        }
+        return fallback_suffixes[strength_letter]
+
+    def normalize_motion_strength_aliases(raw_input):
+        normalized = re.sub(r"\s+", " ", raw_input).strip()
+        motion_alias_pattern = r"(dp|srk|shoryu|shoryuken)"
+        strength_token_pattern = r"(lp|mp|hp|lk|mk|hk|light|medium|heavy|l|m|h)"
+        available_623_suffixes = get_motion_suffixes("623")
+
+        od_motion_match = re.fullmatch(
+            rf"(?:od|ex)\s*(?:\+)?\s*{motion_alias_pattern}",
+            normalized,
+        )
+        if od_motion_match:
+            if "pp" in available_623_suffixes:
+                return "623pp"
+            if "kk" in available_623_suffixes:
+                return "623kk"
+            return "623pp"
+
+        strength_motion_match = re.fullmatch(
+            rf"{strength_token_pattern}\s*(?:\+)?\s*{motion_alias_pattern}",
+            normalized,
+        )
+        if strength_motion_match:
+            strength_token = strength_motion_match.group(1)
+            resolved_suffix = resolve_623_strength_suffix(
+                strength_token,
+                available_623_suffixes,
+            )
+            if resolved_suffix:
+                return f"623{resolved_suffix}"
+            return normalized
+
+        motion_strength_match = re.fullmatch(
+            rf"{motion_alias_pattern}\s*(?:\+)?\s*{strength_token_pattern}",
+            normalized,
+        )
+        if motion_strength_match:
+            strength_token = motion_strength_match.group(2)
+            resolved_suffix = resolve_623_strength_suffix(
+                strength_token,
+                available_623_suffixes,
+            )
+            if resolved_suffix:
+                return f"623{resolved_suffix}"
+
+        return normalized
+
+    def resolve_strength_special_input(raw_input):
+        normalized = re.sub(r"\s+", " ", raw_input).strip().lower()
+        strength_map = {
+            "light": ["lp", "lk"],
+            "l": ["lp", "lk"],
+            "medium": ["mp", "mk"],
+            "m": ["mp", "mk"],
+            "heavy": ["hp", "hk"],
+            "h": ["hp", "hk"],
+        }
+
+        match = re.fullmatch(r"(light|medium|heavy|l|m|h)\s+(.+)", normalized)
+        if not match:
+            match = re.fullmatch(r"(.+)\s+(light|medium|heavy|l|m|h)", normalized)
+            if not match:
+                return normalized
+            remainder = match.group(1).strip()
+            strength_token = match.group(2)
+        else:
+            strength_token = match.group(1)
+            remainder = match.group(2).strip()
+
+        candidate_prefixes = strength_map.get(strength_token, [])
+        if not candidate_prefixes:
+            return normalized
+
+        for prefix in candidate_prefixes:
+            candidate = f"{prefix} {remainder}"
+            candidate_compact = re.sub(r"[^a-z0-9]", "", candidate)
+            for row in data:
+                num_cmd = str(row.get("numCmd", "")).lower()
+                pln_cmd = str(row.get("plnCmd", "")).lower()
+                cmn_name = str(row.get("cmnName", "")).lower()
+                move_name = str(row.get("moveName", "")).lower()
+                if (
+                    candidate == num_cmd
+                    or candidate == pln_cmd
+                    or candidate == cmn_name
+                    or candidate in cmn_name
+                    or candidate in move_name
+                ):
+                    return candidate
+                cmn_compact = re.sub(r"[^a-z0-9]", "", cmn_name)
+                move_compact = re.sub(r"[^a-z0-9]", "", move_name)
+                if candidate_compact and (
+                    candidate_compact in cmn_compact
+                    or candidate_compact in move_compact
+                ):
+                    return candidate
+
+        return normalized
+
+    move_input = normalize_motion_strength_aliases(move_input)
+    move_input = resolve_strength_special_input(move_input)
+
     combo_input = None
     if ">" in move_input or "->" in move_input:
         combo_input = re.sub(r"\s+", "", move_input.replace("->", ">"))
@@ -1945,6 +2280,7 @@ def lookup_frame_data(character, move_input):
     char_aliases = CHARACTER_INPUT_ALIASES.get(char_key, {})
     if move_input in char_aliases:
         move_input = char_aliases[move_input]
+    move_input_compact = re.sub(r"[^a-z0-9]", "", move_input)
     
     # search priority: numCmd -> plnCmd -> moveName
     for row in data:
@@ -1973,8 +2309,17 @@ def lookup_frame_data(character, move_input):
         if cmn_name == move_input or (cmn_name and move_input in cmn_name):
             return row
         # fuzzy match moveName ("Stand MP")
-        if move_input in str(row.get('moveName', '')).lower():
+        move_name = str(row.get('moveName', '')).lower()
+        if move_input in move_name:
             return row
+        if len(move_input_compact) >= 6:
+            cmn_compact = re.sub(r"[^a-z0-9]", "", cmn_name)
+            move_name_compact = re.sub(r"[^a-z0-9]", "", move_name)
+            if (
+                (cmn_compact and move_input_compact in cmn_compact)
+                or move_input_compact in move_name_compact
+            ):
+                return row
             
     return None
 
@@ -2077,6 +2422,175 @@ def format_frame_data(row):
         f"Notes: {row.get('extraInfo', '')}"
     )
 
+
+def format_startup_only_reply(rows):
+    lines = []
+    seen = set()
+    for row in rows:
+        key = (
+            row.get("char_name", "Unknown"),
+            row.get("moveName", "Unknown"),
+            row.get("numCmd", "?"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        startup_raw = str(row.get("startup", "-")).replace("*", ",").strip()
+        startup = startup_raw if startup_raw else "-"
+        startup_suffix = "f" if any(ch.isdigit() for ch in startup) and not startup.endswith("f") else ""
+        char_name = row.get("char_name", "Unknown")
+        move_name = row.get("moveName", "Unknown")
+        num_cmd = row.get("numCmd", "?")
+        lines.append(f"{char_name}'s {move_name} ({num_cmd}) startup is {startup}{startup_suffix}.")
+    return "\n".join(lines[:4])
+
+
+def format_hitconfirm_only_reply(rows):
+    lines = []
+    seen = set()
+    for row in rows:
+        key = (
+            row.get("char_name", "Unknown"),
+            row.get("moveName", "Unknown"),
+            row.get("numCmd", "?"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        char_name = row.get("char_name", "Unknown")
+        move_name = row.get("moveName", "Unknown")
+        num_cmd = row.get("numCmd", "?")
+        hc_sp = str(row.get("hcWinSpCa", "-")).replace("*", ",").strip() or "-"
+        hc_tc = str(row.get("hcWinTc", "-")).replace("*", ",").strip() or "-"
+        hc_notes = str(row.get("hcWinNotes", "-")).replace("[", "").replace("]", "").replace('"', "").strip() or "-"
+        lines.append(
+            f"{char_name}'s {move_name} ({num_cmd}) hit confirm window is Sp/Su: {hc_sp}, TC: {hc_tc}. Notes: {hc_notes}"
+        )
+    return "\n".join(lines[:4])
+
+
+def format_super_gain_only_reply(rows):
+    lines = []
+    seen = set()
+    for row in rows:
+        key = (
+            row.get("char_name", "Unknown"),
+            row.get("moveName", "Unknown"),
+            row.get("numCmd", "?"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        char_name = row.get("char_name", "Unknown")
+        move_name = row.get("moveName", "Unknown")
+        num_cmd = row.get("numCmd", "?")
+        super_hit = str(row.get("SelfSoH", "-")).replace("*", ",").strip() or "-"
+        super_block = str(row.get("SelfSoB", "-")).replace("*", ",").strip() or "-"
+        lines.append(
+            f"{char_name}'s {move_name} ({num_cmd}) super gain is Hit: {super_hit}, Block: {super_block}."
+        )
+    return "\n".join(lines[:4])
+
+
+def truncate_embed_value(value, limit):
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    if limit <= 3:
+        return text[:limit]
+    return text[: limit - 3] + "..."
+
+
+def clean_embed_value(value, default="-", strip_brackets=False):
+    text = str(value if value is not None else "").replace("*", ",").strip()
+    if strip_brackets:
+        text = text.replace("[", "").replace("]", "").replace('"', "")
+    if not text:
+        text = default
+    return text
+
+
+def add_embed_field(embed, name, value, inline=True):
+    safe_name = truncate_embed_value(name, 256) or "-"
+    safe_value = truncate_embed_value(value, 1024) or "-"
+    embed.add_field(name=safe_name, value=safe_value, inline=inline)
+
+
+def build_frame_embed(row):
+    char_name = clean_embed_value(row.get("char_name", "Unknown"), default="Unknown")
+    move_name = clean_embed_value(row.get("moveName", "Unknown"), default="Unknown")
+    num_cmd = clean_embed_value(row.get("numCmd", "?"), default="?")
+
+    embed = discord.Embed(
+        title=truncate_embed_value(char_name, 256),
+        description=truncate_embed_value(f"{move_name} ({num_cmd})", 4096),
+        colour=0x3998C6,
+    )
+
+    startup = clean_embed_value(row.get("startup", "-"))
+    active = clean_embed_value(row.get("active", "-"))
+    recovery = clean_embed_value(row.get("recovery", "-")).replace("(", " (Whiff: ")
+    cancel = clean_embed_value(row.get("xx", "-"))
+    damage = clean_embed_value(row.get("dmg", "-"))
+    guard = clean_embed_value(row.get("atkLvl", "-"))
+    on_hit = clean_embed_value(row.get("onHit", "-"))
+    on_block = clean_embed_value(row.get("onBlock", "-"))
+
+    drive_hit = clean_embed_value(row.get("DDoH", "-"))
+    drive_block = clean_embed_value(row.get("DDoB", "-"))
+    drive_gain = clean_embed_value(row.get("DGain", "-"))
+    super_hit = clean_embed_value(row.get("SelfSoH", "-"))
+    super_block = clean_embed_value(row.get("SelfSoB", "-"))
+
+    stun_hit = clean_embed_value(row.get("hitstun", "-"))
+    stun_block = clean_embed_value(row.get("blockstun", "-"))
+
+    hc_sp = clean_embed_value(row.get("hcWinSpCa", "-"))
+    hc_tc = clean_embed_value(row.get("hcWinTc", "-"))
+    hc_notes = clean_embed_value(row.get("hcWinNotes", "-"), strip_brackets=True)
+
+    add_embed_field(embed, "Startup", startup, inline=True)
+    add_embed_field(embed, "Active", active, inline=True)
+    add_embed_field(embed, "Recovery", recovery, inline=True)
+
+    add_embed_field(embed, "On Hit", on_hit, inline=True)
+    add_embed_field(embed, "On Block", on_block, inline=True)
+    add_embed_field(embed, "Cancel", cancel, inline=True)
+
+    add_embed_field(embed, "Damage", damage, inline=True)
+    add_embed_field(embed, "Guard", guard, inline=True)
+    add_embed_field(embed, "Drive Gain", drive_gain, inline=True)
+
+    add_embed_field(embed, "Drive Dmg", f"Hit: {drive_hit} / Block: {drive_block}", inline=True)
+    add_embed_field(embed, "Super Gain", f"Hit: {super_hit} / Block: {super_block}", inline=True)
+    add_embed_field(embed, "Stun", f"Hit: {stun_hit} / Block: {stun_block}", inline=True)
+
+    add_embed_field(embed, "Hit Confirm (Sp/Su)", hc_sp, inline=True)
+    add_embed_field(embed, "Hit Confirm (TC)", hc_tc, inline=True)
+    add_embed_field(embed, "Hit Confirm Notes", hc_notes, inline=False)
+
+    extra_info = clean_embed_value(row.get("extraInfo", "-"), strip_brackets=True)
+    if extra_info != "-":
+        embed.set_footer(text=truncate_embed_value(extra_info, 2048))
+
+    return embed
+
+
+def build_frame_embeds(rows):
+    embeds = []
+    seen = set()
+    for row in rows:
+        key = (
+            row.get("char_name", "Unknown"),
+            row.get("moveName", "Unknown"),
+            row.get("numCmd", "?"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        embeds.append(build_frame_embed(row))
+    return embeds
+
 def get_selected_figures_str(guild):
     """Pick a random figure from the BUENAVISTA role members."""
     figures_pool = ['Yimbo', 'zed', 'sainted', 'LL', 'Torino']
@@ -2127,6 +2641,32 @@ def parse_timezone(tz_str):
         return None, None
 
 
+def is_reminder_request_text(text):
+    return bool(re.search(r"\bremind(?:\s+me)?\b", text or "", re.IGNORECASE))
+
+
+def get_reminder_target_user_ids(message, existing_ids=None):
+    targets = []
+    if existing_ids:
+        for user_id in existing_ids:
+            try:
+                normalized = int(user_id)
+            except (TypeError, ValueError):
+                continue
+            if normalized not in targets:
+                targets.append(normalized)
+
+    for member in message.mentions:
+        if client.user and member.id == client.user.id:
+            continue
+        if member.id not in targets:
+            targets.append(member.id)
+
+    if not targets:
+        targets.append(message.author.id)
+    return targets
+
+
 def parse_reminder_request(text, allow_missing_tz=False):
     text = text.strip()
     if not text:
@@ -2158,7 +2698,7 @@ def parse_reminder_request(text, allow_missing_tz=False):
     if to_after_time:
         task = to_after_time.group(1).strip()
     if not task:
-        task = re.sub(r"^\s*remind\s+me\s+(?:to\s+)?", "", text, flags=re.IGNORECASE).strip()
+        task = re.sub(r"^\s*remind(?:\s+me)?\s+(?:to\s+)?", "", text, flags=re.IGNORECASE).strip()
         task = re.sub(r"\bat\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?\b.*$", "", task, flags=re.IGNORECASE).strip()
     if not task:
         return None, None, None, None, "I couldn't find the task. Try: 'remind me to <task> at 2:30pm GMT'.", None
@@ -2291,9 +2831,15 @@ async def reminder_loop():
                     reminder["task"],
                     getattr(channel, "guild", None),
                 )
+                target_ids = reminder.get("notify_user_ids") or [reminder["user_id"]]
+                target_ids = [int(uid) for uid in target_ids if str(uid).isdigit()]
+                if not target_ids:
+                    target_ids = [reminder["user_id"]]
                 if channel:
                     try:
-                        await channel.send(f"<@{reminder['user_id']}> {reminder_text}")
+                        mention_prefix = " ".join(f"<@{uid}>" for uid in target_ids)
+                        channel_text = f"{mention_prefix} {reminder_text}".strip()
+                        await channel.send(channel_text)
                     except Exception as e:
                         print(
                             "Reminder send error: channel_id="
@@ -2301,24 +2847,25 @@ async def reminder_loop():
                             flush=True,
                         )
                 else:
-                    try:
-                        user = await client.fetch_user(reminder["user_id"])
-                        await user.send(reminder_text)
-                        print(
-                            "Reminder DM fallback sent: user_id="
-                            f"{reminder['user_id']}",
-                            flush=True,
-                        )
-                    except Exception as e:
-                        print(
-                            "Reminder DM fallback error: user_id="
-                            f"{reminder['user_id']} error={e}",
-                            flush=True,
-                        )
+                    for target_id in target_ids:
+                        try:
+                            user = await client.fetch_user(target_id)
+                            await user.send(reminder_text)
+                            print(
+                                "Reminder DM fallback sent: user_id="
+                                f"{target_id}",
+                                flush=True,
+                            )
+                        except Exception as e:
+                            print(
+                                "Reminder DM fallback error: user_id="
+                                f"{target_id} error={e}",
+                                flush=True,
+                            )
                 print(
                     "Reminder fired: user_id="
                     f"{reminder['user_id']} channel_id={reminder['channel_id']} "
-                    f"when_utc={reminder['when_utc'].isoformat()}",
+                    f"when_utc={reminder['when_utc'].isoformat()} targets={target_ids}",
                     flush=True,
                 )
             REMINDERS[:] = [r for r in REMINDERS if r not in due]
@@ -2348,27 +2895,54 @@ async def send_generated_encouragement(channel, source_label="scheduled"):
         print(f"{source_label.capitalize()} encouragement skipped: LLM disabled.", flush=True)
         return
 
+    selected_prompt = random.choice(ENCOURAGEMENT_PROMPTS)
+    prompt_kind = (
+        "anecdote"
+        if selected_prompt == ENCOURAGEMENT_ANECDOTE_PROMPT
+        else "improvement"
+    )
     selected_figures_str = get_selected_figures_str(channel.guild)
     llm_messages = [
         {
             "role": "system",
             "content": IMPROVEMENT_PROMPT.format(selected_figures_str=selected_figures_str),
         },
-        {"role": "user", "content": ENCOURAGEMENT_PROMPT},
+        {"role": "user", "content": selected_prompt},
     ]
     try:
         reply_text = await get_llm_response(llm_messages)
         await channel.send(reply_text)
         print(
-            f"{source_label.capitalize()} encouragement sent at {datetime.datetime.now().isoformat()}",
+            f"{source_label.capitalize()} encouragement ({prompt_kind}) sent at {datetime.datetime.now().isoformat()}",
             flush=True,
         )
     except Exception as e:
         print(f"{source_label.capitalize()} encouragement error: {e}", flush=True)
 
 
-def get_daily_random_slots(day_start, count):
-    second_slots = sorted(random.sample(range(86400), count))
+async def send_daily_damn_gg(channel, source_label="scheduled"):
+    try:
+        await channel.send(DAILY_DAMN_GG_TEXT)
+        print(
+            f"{source_label.capitalize()} literal message sent at {datetime.datetime.now().isoformat()}",
+            flush=True,
+        )
+    except Exception as e:
+        print(f"{source_label.capitalize()} literal message error: {e}", flush=True)
+
+
+def get_daily_random_slots(day_start, count, excluded_slots=None):
+    excluded_seconds = set()
+    for slot in excluded_slots or []:
+        if slot.date() != day_start.date():
+            continue
+        excluded_seconds.add(int((slot - day_start).total_seconds()))
+
+    available_seconds = [second for second in range(86400) if second not in excluded_seconds]
+    if count <= 0 or not available_seconds:
+        return []
+    sample_count = min(count, len(available_seconds))
+    second_slots = sorted(random.sample(available_seconds, sample_count))
     return [day_start + datetime.timedelta(seconds=slot) for slot in second_slots]
 
 
@@ -2418,11 +2992,8 @@ async def background_task():
             day_start = day_start + datetime.timedelta(days=1)
             remaining_slots = get_daily_random_slots(day_start, DAILY_ENCOURAGEMENT_MESSAGES)
 
-        slot_log = ", ".join(slot.strftime("%H:%M:%S") for slot in remaining_slots)
-        print(
-            f"Encouragement slots for {day_start.date()}: {slot_log}",
-            flush=True,
-        )
+        slot_log = ", ".join(slot.strftime("%Y-%m-%d %H:%M:%S") for slot in remaining_slots)
+        print(f"Encouragement slots: {slot_log}", flush=True)
 
         for slot_time in remaining_slots:
             NEXT_RUN_TIME = slot_time
@@ -2434,6 +3005,41 @@ async def background_task():
             await send_generated_encouragement(channel, source_label="scheduled")
 
         NEXT_RUN_TIME = None
+
+
+async def background_damn_gg_task():
+    global NEXT_DAMN_GG_TIME
+    await client.wait_until_ready()
+    channel = client.get_channel(CHANNEL_ID)
+    if not channel:
+        print(f"Could not find channel with ID {CHANNEL_ID}")
+        return
+
+    print("Damn gg scheduling started.", flush=True)
+
+    while not client.is_closed():
+        now = datetime.datetime.now()
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_slots = get_daily_random_slots(day_start, DAILY_DAMN_GG_MESSAGES)
+        remaining_slots = [slot for slot in day_slots if slot > now]
+
+        if not remaining_slots:
+            day_start = day_start + datetime.timedelta(days=1)
+            remaining_slots = get_daily_random_slots(day_start, DAILY_DAMN_GG_MESSAGES)
+
+        slot_log = ", ".join(slot.strftime("%Y-%m-%d %H:%M:%S") for slot in remaining_slots)
+        print(f"Damn gg slots: {slot_log}", flush=True)
+
+        for slot_time in remaining_slots:
+            NEXT_DAMN_GG_TIME = slot_time
+            wait_seconds = (slot_time - datetime.datetime.now()).total_seconds()
+            if wait_seconds > 0:
+                await asyncio.sleep(wait_seconds)
+            if client.is_closed():
+                return
+            await send_daily_damn_gg(channel, source_label="scheduled")
+
+        NEXT_DAMN_GG_TIME = None
 
 
 async def background_video_task():
@@ -2481,6 +3087,7 @@ async def background_video_task():
 async def time_handler(request):
     data = {
         "target_time": str(NEXT_RUN_TIME) if NEXT_RUN_TIME else None,
+        "damn_gg_time": str(NEXT_DAMN_GG_TIME) if NEXT_DAMN_GG_TIME else None,
         "video_time": str(NEXT_VIDEO_TIME) if NEXT_VIDEO_TIME else None,
     }
     return web.json_response(data)
@@ -2499,6 +3106,7 @@ async def start_web_server():
 message_queue = None
 worker_task = None
 background_task_handle = None
+background_damn_gg_task_handle = None
 background_video_task_handle = None
 reminder_task_handle = None
 web_server_task = None
@@ -2544,12 +3152,22 @@ async def worker():
     while True:
         # get msg from queue
         ctx = await message_queue.get()
-        if len(ctx) == 3:
+        if len(ctx) == 5:
+            message, llm_messages, fallback_reply, reply_prefix, reply_embeds = ctx
+        elif len(ctx) == 4:
+            message, llm_messages, fallback_reply, reply_prefix = ctx
+            reply_embeds = []
+        elif len(ctx) == 3:
             message, llm_messages, fallback_reply = ctx
+            reply_prefix = None
+            reply_embeds = []
         else:
             message, llm_messages = ctx
             fallback_reply = None
+            reply_prefix = None
+            reply_embeds = []
 
+        embeds_sent = False
         try:
             # extract user query and determine if search should be used
             user_query = ""
@@ -2563,10 +3181,26 @@ async def worker():
 
             async with message.channel.typing():
                 reply_text = await get_llm_response(llm_messages, enable_search=enable_search)
+                final_reply = f"{reply_prefix}\n\n{reply_text}" if reply_prefix else reply_text
                 try:
-                    await message.reply(reply_text)
+                    if reply_embeds:
+                        try:
+                            for embed in reply_embeds:
+                                await message.channel.send(embed=embed)
+                            embeds_sent = True
+                            await message.channel.send(final_reply)
+                        except Exception as embed_error:
+                            print(f"Embed send failed, falling back to text: {embed_error}", flush=True)
+                            fallback_payload = (
+                                f"{fallback_reply}\n\n{reply_text}"
+                                if fallback_reply
+                                else final_reply
+                            )
+                            await message.reply(fallback_payload)
+                    else:
+                        await message.reply(final_reply)
                 except Exception as reply_error:
-                    if is_deleted_message_reference_error(reply_error):
+                    if not reply_embeds and is_deleted_message_reference_error(reply_error):
                         print("Worker reply target deleted before send. Triggering failsafe.", flush=True)
                         await send_deleted_message_failsafe(message.channel)
                     else:
@@ -2575,12 +3209,24 @@ async def worker():
             print(f"Worker error: {e}")
             error_detail = str(e)
             try:
-                if fallback_reply:
-                    await message.reply(f"{fallback_reply}\n\nLLM error: {error_detail}")
+                if reply_embeds:
+                    if not embeds_sent:
+                        for embed in reply_embeds:
+                            await message.channel.send(embed=embed)
+                    await message.channel.send(f"LLM error: {error_detail}")
                 else:
-                    await message.reply(f"LLM error: {error_detail}")
+                    if fallback_reply:
+                        error_reply = f"{fallback_reply}\n\nLLM error: {error_detail}"
+                        if reply_prefix and fallback_reply != reply_prefix:
+                            error_reply = f"{reply_prefix}\n\n{error_reply}"
+                        await message.reply(error_reply)
+                    else:
+                        if reply_prefix:
+                            await message.reply(f"{reply_prefix}\n\nLLM error: {error_detail}")
+                        else:
+                            await message.reply(f"LLM error: {error_detail}")
             except Exception as reply_error:
-                if is_deleted_message_reference_error(reply_error):
+                if not reply_embeds and is_deleted_message_reference_error(reply_error):
                     print("Worker error reply target deleted. Triggering failsafe.", flush=True)
                     await send_deleted_message_failsafe(message.channel)
                     continue
@@ -2593,6 +3239,7 @@ async def on_ready():
     global message_queue
     global worker_task
     global background_task_handle
+    global background_damn_gg_task_handle
     global background_video_task_handle
     global reminder_task_handle
     global web_server_task
@@ -2603,6 +3250,9 @@ async def on_ready():
     # start bg task
     if background_task_handle is None or background_task_handle.done():
         background_task_handle = client.loop.create_task(background_task())
+    # start damn gg task
+    if background_damn_gg_task_handle is None or background_damn_gg_task_handle.done():
+        background_damn_gg_task_handle = client.loop.create_task(background_damn_gg_task())
     # start video task
     if background_video_task_handle is None or background_video_task_handle.done():
         background_video_task_handle = client.loop.create_task(background_video_task())
@@ -2674,7 +3324,7 @@ async def on_message(message):
                 flush=True,
             )
         else:
-            if "remind me" in content_lower:
+            if is_reminder_request_text(content_lower):
                 del PENDING_REMINDERS[pending_key]
             else:
                 tz_match = TZ_REGEX.search(content_no_mentions)
@@ -2705,16 +3355,21 @@ async def on_message(message):
                         await message.reply("That time has already passed. Please choose a future time.")
                         return
                     reminder_utc = reminder_dt.astimezone(datetime.timezone.utc)
+                    notify_user_ids = get_reminder_target_user_ids(
+                        message,
+                        existing_ids=pending.get("notify_user_ids"),
+                    )
                     REMINDERS.append({
                         "user_id": message.author.id,
                         "channel_id": message.channel.id,
                         "task": pending["task"],
                         "when_utc": reminder_utc,
+                        "notify_user_ids": notify_user_ids,
                     })
                     print(
                         "Pending reminder scheduled: user_id="
                         f"{message.author.id} channel_id={message.channel.id} "
-                        f"when_utc={reminder_utc.isoformat()} tz={tz_label}",
+                        f"when_utc={reminder_utc.isoformat()} tz={tz_label} targets={notify_user_ids}",
                         flush=True,
                     )
                     del PENDING_REMINDERS[pending_key]
@@ -2727,7 +3382,8 @@ async def on_message(message):
                     await message.reply(reply_text)
                     return
 
-    if client.user.mentioned_in(message) and "remind me" in content_lower:
+    if client.user.mentioned_in(message) and is_reminder_request_text(content_lower):
+        notify_user_ids = get_reminder_target_user_ids(message)
         task, reminder_dt, reminder_utc, tz_label, error, pending = parse_reminder_request(
             content_no_mentions,
             allow_missing_tz=True,
@@ -2735,13 +3391,14 @@ async def on_message(message):
         if pending:
             PENDING_REMINDERS[pending_key] = {
                 **pending,
+                "notify_user_ids": notify_user_ids,
                 "created_at": datetime.datetime.now(datetime.timezone.utc),
             }
             print(
                 "Pending reminder created: user_id="
                 f"{message.author.id} channel_id={message.channel.id} "
                 f"task={pending['task']} time={pending['hour']:02d}:{pending['minute']:02d} "
-                f"rel={pending['rel']} date={pending['date_str']}",
+                f"rel={pending['rel']} date={pending['date_str']} targets={notify_user_ids}",
                 flush=True,
             )
             await message.reply("Please include a timezone (e.g., GMT, UTC+2, America/New_York).")
@@ -2754,11 +3411,12 @@ async def on_message(message):
             "channel_id": message.channel.id,
             "task": task,
             "when_utc": reminder_utc,
+            "notify_user_ids": notify_user_ids,
         })
         print(
             "Reminder scheduled: user_id="
             f"{message.author.id} channel_id={message.channel.id} "
-            f"when_utc={reminder_utc.isoformat()} tz={tz_label}",
+            f"when_utc={reminder_utc.isoformat()} tz={tz_label} targets={notify_user_ids}",
             flush=True,
         )
         reply_text = await build_reminder_ack_text(
@@ -2787,14 +3445,80 @@ async def on_message(message):
     fd_context_payload = find_moves_in_text(content_lower)
     fd_context_data = fd_context_payload.get("data", "")
     fd_context_mode = fd_context_payload.get("mode", "none")
+    fd_context_rows = fd_context_payload.get("rows", [])
+    startup_alias_query = bool(fd_context_payload.get("startup_alias_query"))
+    hitconfirm_alias_query = bool(fd_context_payload.get("hitconfirm_alias_query"))
+    super_gain_alias_query = bool(fd_context_payload.get("super_gain_alias_query"))
+    property_only_query = bool(fd_context_payload.get("property_only_query"))
     fallback_reply = fd_context_data if fd_context_data else None
     explicit_frame_request = (
-        "framedata" in content_lower or "frame data" in content_lower
+        "framedata" in content_lower
+        or "frame data" in content_lower
+        or re.search(r"\bframes?\b", content_lower)
+        or re.search(r"\bhow\s+fast\b", content_lower)
+        or re.search(r"\bhow\s+quick\b", content_lower)
+        or re.search(r"\bspeed\s+of\b", content_lower)
+        or (
+            re.search(r"\bfast\b", content_lower)
+            and re.search(r"\b[1-9][0-9]*[a-zA-Z]{1,3}\b", content_lower)
+        )
     )
+    force_verbatim_frame_reply = bool(
+        fd_context_mode == "frame"
+        and not property_only_query
+        and fd_context_rows
+    )
+    frame_reply_embeds = (
+        build_frame_embeds(fd_context_rows)
+        if force_verbatim_frame_reply and fd_context_rows
+        else []
+    )
+    if frame_reply_embeds:
+        print(
+            "Frame embed mode active: "
+            f"count={len(frame_reply_embeds)} property_only={property_only_query}",
+            flush=True,
+        )
     
 
     
     if client.user.mentioned_in(message) or ".framedata" in content_lower:
+        if super_gain_alias_query and fd_context_mode == "frame" and fd_context_rows:
+            super_gain_reply = format_super_gain_only_reply(fd_context_rows)
+            if super_gain_reply:
+                try:
+                    await message.reply(super_gain_reply)
+                except Exception as reply_error:
+                    if is_deleted_message_reference_error(reply_error):
+                        print("Direct super gain reply target deleted. Triggering failsafe.", flush=True)
+                        await send_deleted_message_failsafe(message.channel)
+                    else:
+                        print(f"Direct super gain reply error: {reply_error}", flush=True)
+                return
+        if hitconfirm_alias_query and fd_context_mode == "frame" and fd_context_rows:
+            hitconfirm_reply = format_hitconfirm_only_reply(fd_context_rows)
+            if hitconfirm_reply:
+                try:
+                    await message.reply(hitconfirm_reply)
+                except Exception as reply_error:
+                    if is_deleted_message_reference_error(reply_error):
+                        print("Direct hitconfirm reply target deleted. Triggering failsafe.", flush=True)
+                        await send_deleted_message_failsafe(message.channel)
+                    else:
+                        print(f"Direct hitconfirm reply error: {reply_error}", flush=True)
+                return
+        if startup_alias_query and fd_context_mode == "frame" and fd_context_rows:
+            startup_reply = format_startup_only_reply(fd_context_rows)
+            if startup_reply:
+                try:
+                    await message.reply(startup_reply)
+                except Exception as reply_error:
+                    if is_deleted_message_reference_error(reply_error):
+                        print("Direct startup reply target deleted. Triggering failsafe.", flush=True)
+                        await send_deleted_message_failsafe(message.channel)
+                    else:
+                        print(f"Direct startup reply error: {reply_error}", flush=True)
+                return
         
         # If Coach Mode, pre-pend some advice instruction
         coach_instruction = ""
@@ -2808,30 +3532,56 @@ async def on_message(message):
         if fd_context_data:
             if fd_context_mode == "frame":
                 # Found relevant frame data! Inject it.
-                replied_context = (
-                    f"{coach_instruction}"
-                    f"USER QUERY: {content_no_mentions}\n"
-                    f"AVAILABLE DATA:\n{fd_context_data}\n"
-                    f"{MOVE_DEFINITIONS}\n"
-                    "INSTRUCTION: Use the AVAILABLE DATA to answer the user's question.\n"
-                    " - If the user asks for 'frame data', 'stats', or general info, output the full data block VERBATIM.\n"
-                    " - If the user asks for a SPECIFIC property (e.g. 'what is the recovery?', 'is it plus?', 'damage?'), answer DIRECTLY with just that value in a sentence. Do NOT output the full chart unless asked.\n"
-                    " - Examples:\n"
-                    "   User: 'Startup of Ryu 5LP?' -> Bot: 'Ryu's Stand LP has 4 frames of startup.'\n"
-                    "   User: 'Ryu 5LP frame data' -> Bot: [Outputs Full Chart]\n"
-                    "Even if the user asks for a comparison (like 'who is faster?'), FIRST list the full stats for valid moves, THEN add a brief 1-sentence comparison.\n"
-                    "If the user asks about stats (health, reversal, etc.), use the provided **Stats** block.\n"
-                    "CRITICAL: If a move's frame data is not listed in AVAILABLE DATA above, DO NOT INVENT IT. Just say you don't have the scrolls for it.\n"
-                    "CRITICAL: The 'Cancel' field corresponds to the 'xx' column in the data. \n"
-                    " - If Cancel is 'sp', it means Special Cancellable.\n"
-                    " - If Cancel is 'su', it means Super Cancellable.\n"
-                    " - If Cancel is '-' or 'No', it is NOT cancellable. Do NOT suggest canceling it.\n"
-                    "Format for Moves: \n"
-                    "**Move Name**\n"
-                    "Startup: X // Active: Y ...\n"
-                    "(Repeat for all moves)\n\n"
-                    "Comparison: [Your 1 sentence comparison]"
-                )
+                if frame_reply_embeds:
+                    replied_context = (
+                        f"{coach_instruction}"
+                        f"USER QUERY: {content_no_mentions}\n"
+                        f"AVAILABLE DATA:\n{fd_context_data}\n"
+                        f"{MOVE_DEFINITIONS}\n"
+                        "INSTRUCTION: The full frame table is already shown above your reply.\n"
+                        " - Write a short follow-up comment (1-2 sentences) underneath the table.\n"
+                        " - Do NOT reprint or restate the full table.\n"
+                        " - If the user asked for a comparison or takeaway, give a brief practical note using AVAILABLE DATA.\n"
+                        " - If data is missing for what they asked, say you don't have the scrolls for that part.\n"
+                        "CRITICAL: Do NOT invent frame data not present in AVAILABLE DATA."
+                    )
+                elif property_only_query:
+                    replied_context = (
+                        f"{coach_instruction}"
+                        f"USER QUERY: {content_no_mentions}\n"
+                        f"AVAILABLE DATA:\n{fd_context_data}\n"
+                        f"{MOVE_DEFINITIONS}\n"
+                        "INSTRUCTION: Answer with ONLY the specific value the user asked for in plain text.\n"
+                        " - Do NOT output the full frame table for this request.\n"
+                        " - If they ask startup/active/recovery/on hit/on block/cancel/damage/drive/super gain/stun/hit confirm, return those exact values only.\n"
+                        " - Keep it concise (1-2 sentences max).\n"
+                        "CRITICAL: Do NOT invent values not present in AVAILABLE DATA."
+                    )
+                else:
+                    replied_context = (
+                        f"{coach_instruction}"
+                        f"USER QUERY: {content_no_mentions}\n"
+                        f"AVAILABLE DATA:\n{fd_context_data}\n"
+                        f"{MOVE_DEFINITIONS}\n"
+                        "INSTRUCTION: Use the AVAILABLE DATA to answer the user's question.\n"
+                        " - If the user asks for 'frame data', 'stats', or general info, output the full data block VERBATIM.\n"
+                        " - If the user asks for a SPECIFIC property (e.g. 'what is the recovery?', 'is it plus?', 'damage?'), answer DIRECTLY with just that value in a sentence. Do NOT output the full chart unless asked.\n"
+                        " - Examples:\n"
+                        "   User: 'Startup of Ryu 5LP?' -> Bot: 'Ryu's Stand LP has 4 frames of startup.'\n"
+                        "   User: 'Ryu 5LP frame data' -> Bot: [Outputs Full Chart]\n"
+                        "Even if the user asks for a comparison (like 'who is faster?'), FIRST list the full stats for valid moves, THEN add a brief 1-sentence comparison.\n"
+                        "If the user asks about stats (health, reversal, etc.), use the provided **Stats** block.\n"
+                        "CRITICAL: If a move's frame data is not listed in AVAILABLE DATA above, DO NOT INVENT IT. Just say you don't have the scrolls for it.\n"
+                        "CRITICAL: The 'Cancel' field corresponds to the 'xx' column in the data. \n"
+                        " - If Cancel is 'sp', it means Special Cancellable.\n"
+                        " - If Cancel is 'su', it means Super Cancellable.\n"
+                        " - If Cancel is '-' or 'No', it is NOT cancellable. Do NOT suggest canceling it.\n"
+                        "Format for Moves: \n"
+                        "**Move Name**\n"
+                        "Startup: X // Active: Y ...\n"
+                        "(Repeat for all moves)\n\n"
+                        "Comparison: [Your 1 sentence comparison]"
+                    )
                 should_respond = True
             elif fd_context_mode == "combo":
                 replied_context = (
@@ -3016,7 +3766,7 @@ async def on_message(message):
                     llm_messages.append(user_message)
                 
                 # push to queue
-                await message_queue.put((message, llm_messages, fallback_reply))
+                await message_queue.put((message, llm_messages, fallback_reply, None, frame_reply_embeds))
 
              except Exception as e:
                 await message.reply(f"Error generating response: {e}")

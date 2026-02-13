@@ -44,3 +44,4 @@ gemini-3.md
 .vscode/launch.json
 CLAUDE.md
 .claude/settings.local.json
+lltest.py
