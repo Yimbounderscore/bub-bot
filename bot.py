@@ -1026,6 +1026,7 @@ def find_moves_in_text(text):
     text_lower = strip_discord_mentions(text).lower()
     text_lower = normalize_jump_normal_text(text_lower)
     tc_prompt_blocks = []
+    special_prompt_blocks = []
     tc_ambiguous_inputs = set()
     text_tokens = re.findall(r"[a-z0-9]+", text_lower)
 
@@ -1147,7 +1148,9 @@ def find_moves_in_text(text):
         "versus",
     ]
     punish_keywords = ["punish", "punishable", "can i punish", "is it punishable"]
-    wants_bnb = any(kw in text_lower for kw in bnb_keywords)
+    target_combo_query = bool(re.search(r"\b(tc|target\s+combo|targetcombo)\b", text_lower))
+    special_grab_query = bool(re.search(r"\b(command\s+grab|spd|piledriver|typhoon)\b", text_lower))
+    wants_bnb = any(kw in text_lower for kw in bnb_keywords) and not target_combo_query
     wants_oki = any(kw in text_lower for kw in oki_keywords)
     wants_info = any(kw in text_lower for kw in info_keywords)
     wants_comparison = (
@@ -1161,6 +1164,7 @@ def find_moves_in_text(text):
         or startup_alias_query
         or hitconfirm_alias_query
         or super_gain_alias_query
+        or target_combo_query
     )
     bnb_context = ""
     info_blocks = []
@@ -1171,6 +1175,9 @@ def find_moves_in_text(text):
             if (wants_bnb or wants_oki) and char in OKI_DATA:
                 bnb_context += f"\n\n**{char.capitalize()} Oki/Setups:**\n{OKI_DATA[char]}"
     results = []
+    tc_selected_combos = set()
+    tc_base_tokens = set()
+    query_has_explicit_strength = False
     if wants_frame_data:
         # 2. Heuristic: For each mentioned character, search for moves mentioned nearby?
         # Simpler approach: Check if any move inputs are present in the text
@@ -1199,8 +1206,69 @@ def find_moves_in_text(text):
             filtered_inputs.append(cleaned_inp)
         potential_inputs = filtered_inputs
         extra_inputs = []
-        if "ex" in text_lower:
-            extra_inputs.append("od")
+        query_strength_tokens = {
+            "lp", "mp", "hp", "lk", "mk", "hk",
+            "light", "medium", "heavy", "l", "m", "h",
+            "od", "ex",
+        }
+        query_has_explicit_strength = any(token in query_strength_tokens for token in text_tokens)
+
+        def is_special_motion_num_cmd(num_cmd_raw):
+            compact = re.sub(r"[^a-z0-9]", "", str(num_cmd_raw).lower())
+            if not compact or ">" in str(num_cmd_raw):
+                return False
+            motion_prefixes = (
+                "236", "214", "623", "421", "41236", "63214", "4268", "624", "46", "28",
+                "214214", "236236", "360", "720", "22",
+            )
+            return compact.startswith(motion_prefixes)
+
+        if not query_has_explicit_strength and mentioned_chars and not target_combo_query:
+            special_strength_pattern = re.compile(
+                r"^(lp|mp|hp|lk|mk|hk|od|ex|light|medium|heavy|l|m|h)\s+(.+)$"
+            )
+            seen_special_prompts = set()
+            for char in mentioned_chars:
+                special_base_map = {}
+                for row in FRAME_DATA.get(char, []):
+                    if not is_special_motion_num_cmd(row.get("numCmd", "")):
+                        continue
+                    row_names = [str(row.get("cmnName", "")).lower().strip(), str(row.get("moveName", "")).lower().strip()]
+                    for raw_name in row_names:
+                        if not raw_name:
+                            continue
+                        strength_match = special_strength_pattern.match(raw_name)
+                        if not strength_match:
+                            continue
+                        base_name = strength_match.group(2).strip()
+                        if not base_name:
+                            continue
+                        special_base_map.setdefault(base_name, [])
+                        if row not in special_base_map[base_name]:
+                            special_base_map[base_name].append(row)
+
+                for base_name, variants in special_base_map.items():
+                    if len(variants) < 2:
+                        continue
+                    base_tokens = re.findall(r"[a-z0-9]+", base_name)
+                    base_in_query = tokens_in_text(base_tokens)
+                    if not base_in_query and base_name == "spd":
+                        base_in_query = "command" in text_tokens and "grab" in text_tokens
+                    if not base_in_query:
+                        continue
+                    prompt_key = (char, base_name)
+                    if prompt_key in seen_special_prompts:
+                        continue
+                    seen_special_prompts.add(prompt_key)
+                    variant_lines = "\n".join(
+                        f"- {row.get('moveName', '?')} ({row.get('numCmd', '?')})"
+                        for row in variants
+                    )
+                    special_prompt_blocks.append(
+                        f"**Special Strength Options ({char.capitalize()})**\n"
+                        f"{base_name.title()} variants:\n{variant_lines}\n"
+                        "Reply or make a new prompt with the exact strength+move."
+                    )
         dp_strength_inputs = []
         dp_strength_prefix_matches = re.findall(
             r"\b(lp|mp|hp|lk|mk|hk|light|medium|heavy|l|m|h)\s*(?:\+)?\s*(dp|srk|shoryu|shoryuken)\b",
@@ -1290,18 +1358,31 @@ def find_moves_in_text(text):
             if re.search(pattern, text_lower) and token not in extra_inputs:
                 extra_inputs.append(token)
         combo_text = text_lower.replace("->", ">")
-        tc_present = bool(
-            re.search(r"\b(tc|target combo|targetcombo)\b", text_lower)
-        )
+        tc_selected_combos = set()
+        tc_base_tokens = set(re.findall(r"\b[1-9][0-9]*[a-z]{1,3}\b", text_lower))
+        tc_pair_candidates = set()
+        for base_token, follow_token in re.findall(
+            r"\b([1-9][0-9]*[a-z]{1,3})\s*(?:,|>|->)\s*([a-z]{1,3}|[1-9][0-9]*[a-z]{1,3})\b",
+            combo_text,
+        ):
+            tc_pair_candidates.add(f"{base_token}>{follow_token}")
+        for base_token, follow_token in re.findall(
+            r"\b([1-9][0-9]*[a-z]{1,3})\s+([a-z]{1,3})\s+(?:target\s+combo|tc)\b",
+            text_lower,
+        ):
+            tc_pair_candidates.add(f"{base_token}>{follow_token}")
+
         combo_matches = re.findall(
             r"\b[0-9a-zA-Z+]+(?:\s*>\s*[0-9a-zA-Z+]+)+\b",
             combo_text,
         )
         for combo in combo_matches:
             combo_token = re.sub(r"\s+", "", combo)
+            tc_selected_combos.add(combo_token)
             if combo_token not in extra_inputs:
                 extra_inputs.append(combo_token)
-        if tc_present and not combo_matches and mentioned_chars:
+
+        if target_combo_query and mentioned_chars:
             compact_text = re.sub(r"\s+", "", combo_text)
             for char in mentioned_chars:
                 normalized_char = normalize_char_name(char)
@@ -1324,8 +1405,28 @@ def find_moves_in_text(text):
                 for base_key, combos in tc_map.items():
                     if base_key not in compact_text_for_char:
                         continue
+                    explicit_pair_matches = [
+                        pair for pair in tc_pair_candidates if pair.startswith(f"{base_key}>")
+                    ]
+                    if explicit_pair_matches:
+                        matched_any = False
+                        for combo_raw in combos:
+                            combo_key = re.sub(r"\s+", "", combo_raw.lower())
+                            if ">" not in combo_key:
+                                continue
+                            combo_follow = combo_key.split(">", 1)[1]
+                            for explicit_pair in explicit_pair_matches:
+                                explicit_follow = explicit_pair.split(">", 1)[1]
+                                if combo_follow == explicit_follow or combo_follow.startswith(explicit_follow):
+                                    tc_selected_combos.add(combo_key)
+                                    if combo_key not in extra_inputs:
+                                        extra_inputs.append(combo_key)
+                                    matched_any = True
+                        if matched_any:
+                            continue
                     if len(combos) == 1:
                         combo_token = re.sub(r"\s+", "", combos[0].lower())
+                        tc_selected_combos.add(combo_token)
                         if combo_token not in extra_inputs:
                             extra_inputs.append(combo_token)
                         continue
@@ -1334,22 +1435,8 @@ def find_moves_in_text(text):
                     tc_prompt_blocks.append(
                         f"**Target Combo Options ({char.capitalize()})**\n"
                         f"{base_key.upper()} follow-ups:\n{combo_list}\n"
-                        "Reply with the exact follow-up numCmd."
+                        "Reply or Make a new prompt with the exact target combo "
                     )
-        if tc_present:
-            combo_token_pattern = (
-                r"(?:[1-9][0-9a-zA-Z+]*|lp|mp|hp|lk|mk|hk|pp|kk|p|k)"
-            )
-            combo_sequences = re.findall(
-                rf"\b{combo_token_pattern}(?:\s+{combo_token_pattern})+\b",
-                text_lower,
-            )
-            for combo in combo_sequences:
-                if not re.search(r"\d", combo):
-                    continue
-                combo_token = re.sub(r"\s+", "", combo)
-                if combo_token not in extra_inputs:
-                    extra_inputs.append(combo_token)
         keyword_inputs = [
             # 46P moves
             "air slasher",
@@ -1415,6 +1502,8 @@ def find_moves_in_text(text):
         text_compact = re.sub(r"[^a-z0-9]", "", text_lower)
 
         def token_matches_move_name(name_token, query_token):
+            if (name_token == "od" and query_token == "ex") or (name_token == "ex" and query_token == "od"):
+                return True
             if name_token == query_token:
                 return True
             if len(query_token) >= 3 and name_token.startswith(query_token):
@@ -1432,7 +1521,11 @@ def find_moves_in_text(text):
                         continue
                     candidate_names = [raw_name]
                     stripped_name = strength_prefix_re.sub("", raw_name).strip()
-                    if stripped_name and stripped_name != raw_name:
+                    if (
+                        stripped_name
+                        and stripped_name != raw_name
+                        and not query_has_explicit_strength
+                    ):
                         candidate_names.append(stripped_name)
                     for candidate_name in candidate_names:
                         candidate_tokens = re.findall(r"[a-z0-9]+", candidate_name)
@@ -1479,30 +1572,31 @@ def find_moves_in_text(text):
                     )
                 )
 
-            if f"{char} mp" in text_lower and not is_button_part_of_dp_motion("mp"):
-                row = lookup_frame_data(char, "mp")
-                if row and row not in results:
-                    results.append(row)
-            if f"{char} mk" in text_lower and not is_button_part_of_dp_motion("mk"):
-                row = lookup_frame_data(char, "mk")
-                if row and row not in results:
-                    results.append(row)
-            if f"{char} hp" in text_lower and not is_button_part_of_dp_motion("hp"):
-                row = lookup_frame_data(char, "hp")
-                if row and row not in results:
-                    results.append(row)
-            if f"{char} hk" in text_lower and not is_button_part_of_dp_motion("hk"):
-                row = lookup_frame_data(char, "hk")
-                if row and row not in results:
-                    results.append(row)
-            if f"{char} lp" in text_lower and not is_button_part_of_dp_motion("lp"):
-                row = lookup_frame_data(char, "lp")
-                if row and row not in results:
-                    results.append(row)
-            if f"{char} lk" in text_lower and not is_button_part_of_dp_motion("lk"):
-                row = lookup_frame_data(char, "lk")
-                if row and row not in results:
-                    results.append(row)
+            if not special_grab_query:
+                if f"{char} mp" in text_lower and not is_button_part_of_dp_motion("mp"):
+                    row = lookup_frame_data(char, "mp")
+                    if row and row not in results:
+                        results.append(row)
+                if f"{char} mk" in text_lower and not is_button_part_of_dp_motion("mk"):
+                    row = lookup_frame_data(char, "mk")
+                    if row and row not in results:
+                        results.append(row)
+                if f"{char} hp" in text_lower and not is_button_part_of_dp_motion("hp"):
+                    row = lookup_frame_data(char, "hp")
+                    if row and row not in results:
+                        results.append(row)
+                if f"{char} hk" in text_lower and not is_button_part_of_dp_motion("hk"):
+                    row = lookup_frame_data(char, "hk")
+                    if row and row not in results:
+                        results.append(row)
+                if f"{char} lp" in text_lower and not is_button_part_of_dp_motion("lp"):
+                    row = lookup_frame_data(char, "lp")
+                    if row and row not in results:
+                        results.append(row)
+                if f"{char} lk" in text_lower and not is_button_part_of_dp_motion("lk"):
+                    row = lookup_frame_data(char, "lk")
+                    if row and row not in results:
+                        results.append(row)
 
         # SPD/360 variations - for Zangief (Screw Piledriver) and Lily (Mexican Typhoon)
             spd_patterns = [
@@ -1510,17 +1604,26 @@ def find_moves_in_text(text):
                 ("light spd", "lp"), ("medium spd", "mp"), ("heavy spd", "hp"),
                 ("lspd", "lp"), ("mspd", "mp"), ("hspd", "hp"),
                 ("od spd", "od"), ("ex spd", "od"),
+                ("l command grab", "lp"), ("m command grab", "mp"), ("h command grab", "hp"),
+                ("light command grab", "lp"), ("medium command grab", "mp"), ("heavy command grab", "hp"),
+                ("od command grab", "od"), ("ex command grab", "od"),
                 ("360+lp", "lp"), ("360+mp", "mp"), ("360+hp", "hp"), ("360+pp", "od"),
                 ("360lp", "lp"), ("360mp", "mp"), ("360hp", "hp"), ("360pp", "od"),
-                ("spd", ""), ("360", ""),
+                ("command grab", ""), ("spd", ""), ("360", ""),
             ]
             for pattern, strength in spd_patterns:
                 if pattern in text_lower:
+                    if not strength and query_has_explicit_strength:
+                        continue
                     # Try both Screw Piledriver (Gief) and Mexican Typhoon (Lily)
                     if strength:
-                        move_names = [f"{strength} screw piledriver", f"{strength} mexican typhoon"]
+                        move_names = [
+                            f"{strength} command grab",
+                            f"{strength} screw piledriver",
+                            f"{strength} mexican typhoon",
+                        ]
                     else:
-                        move_names = ["screw piledriver", "mexican typhoon"]
+                        move_names = ["command grab", "screw piledriver", "mexican typhoon"]
                     for move_name in move_names:
                         row = lookup_frame_data(char, move_name)
                         if row and row not in results:
@@ -1556,6 +1659,31 @@ def find_moves_in_text(text):
                     if row and row not in results:
                         results.append(row)
                     break  # Only match one typhoon variant
+
+    if special_prompt_blocks and not query_has_explicit_strength:
+        results = []
+
+    if target_combo_query:
+        if tc_prompt_blocks and not tc_selected_combos:
+            results = []
+        else:
+            filtered_tc_results = []
+            for row in results:
+                num_cmd_compact = re.sub(r"\s+", "", str(row.get("numCmd", "")).lower())
+                if ">" not in num_cmd_compact:
+                    continue
+                if tc_selected_combos and num_cmd_compact not in tc_selected_combos:
+                    continue
+                if tc_base_tokens and not any(
+                    num_cmd_compact.startswith(f"{base}>") for base in tc_base_tokens
+                ):
+                    continue
+                if row not in filtered_tc_results:
+                    filtered_tc_results.append(row)
+            if filtered_tc_results:
+                results = filtered_tc_results
+            elif tc_prompt_blocks:
+                results = []
 
     # Format the results
     formatted_blocks = []
@@ -1596,7 +1724,7 @@ def find_moves_in_text(text):
     # If we have a character but NO specific moves found (e.g. "Help me with Ryu"),
     # the LLM will try to give advice about buttons. We MUST provide the data for those likely buttons
     # to prevent hallucinations (like saying 5MK is special cancellable when it isn't).
-    if wants_frame_data and mentioned_chars and not results:
+    if wants_frame_data and mentioned_chars and not results and not target_combo_query and not special_prompt_blocks:
         key_moves = ["5MP", "5MK", "2MK", "5HP", "2HP", "5HK", "2HK"]
         for char in mentioned_chars:
             for km in key_moves:
@@ -1672,6 +1800,8 @@ def find_moves_in_text(text):
 
     if tc_prompt_blocks:
         formatted_blocks.extend(tc_prompt_blocks)
+    if special_prompt_blocks:
+        formatted_blocks.extend(special_prompt_blocks)
     
     sections = []
     if formatted_blocks:
@@ -1711,6 +1841,7 @@ def find_moves_in_text(text):
         "hitconfirm_alias_query": hitconfirm_alias_query,
         "super_gain_alias_query": super_gain_alias_query,
         "property_only_query": property_only_query,
+        "target_combo_query": target_combo_query,
     }
 
 
@@ -1988,6 +2119,8 @@ def lookup_frame_data(character, move_input):
         "srk": "623",
         "shoryu": "623",
         "shoryuken": "623",
+        "hadoken": "fireball",
+        "hadouken": "fireball",
         "sway": "juggling sway",
         "juggling sway": "juggling sway",
         "jus cool": "jus cool",
@@ -2306,11 +2439,11 @@ def lookup_frame_data(character, move_input):
             return row
         # exact/contains match cmnName
         cmn_name = str(row.get('cmnName', '')).lower()
-        if cmn_name == move_input or (cmn_name and move_input in cmn_name):
+        if cmn_name == move_input or (len(move_input_compact) >= 3 and cmn_name and move_input in cmn_name):
             return row
         # fuzzy match moveName ("Stand MP")
         move_name = str(row.get('moveName', '')).lower()
-        if move_input in move_name:
+        if len(move_input_compact) >= 3 and move_input in move_name:
             return row
         if len(move_input_compact) >= 6:
             cmn_compact = re.sub(r"[^a-z0-9]", "", cmn_name)
@@ -2590,6 +2723,46 @@ def build_frame_embeds(rows):
         seen.add(key)
         embeds.append(build_frame_embed(row))
     return embeds
+
+
+def sanitize_embed_followup_text(text):
+    raw = str(text or "").strip()
+    if not raw:
+        return "Noted. The relevant frame data is in the embeds above."
+
+    table_markers = [
+        "Startup:",
+        "Active:",
+        "Recovery:",
+        "On Hit:",
+        "On Block:",
+        "Drive Dmg",
+        "Super Gain",
+        "Hit Confirm",
+        "Stun Frames",
+        "Character:",
+    ]
+    filtered_lines = []
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if any(marker in stripped for marker in table_markers):
+            continue
+        if stripped.startswith("**") and stripped.endswith("**"):
+            continue
+        filtered_lines.append(stripped)
+
+    cleaned = "\n".join(filtered_lines).strip()
+    if cleaned:
+        return cleaned
+
+    sentence_candidates = re.split(r"(?<=[.!?])\s+", raw)
+    for sentence in sentence_candidates:
+        sentence = sentence.strip()
+        if sentence:
+            return sentence
+    return "Noted. The relevant frame data is in the embeds above."
 
 def get_selected_figures_str(guild):
     """Pick a random figure from the BUENAVISTA role members."""
@@ -2931,6 +3104,28 @@ async def send_daily_damn_gg(channel, source_label="scheduled"):
         print(f"{source_label.capitalize()} literal message error: {e}", flush=True)
 
 
+async def send_frame_table_response(message, rows, data_text):
+    embeds = build_frame_embeds(rows or [])
+    if embeds:
+        try:
+            for embed in embeds:
+                await message.channel.send(embed=embed)
+            return True
+        except Exception as e:
+            print(f"Direct frame embed send failed, falling back to text: {e}", flush=True)
+    if data_text:
+        try:
+            await message.reply(data_text)
+            return True
+        except Exception as reply_error:
+            if is_deleted_message_reference_error(reply_error):
+                print("Direct frame table reply target deleted. Triggering failsafe.", flush=True)
+                await send_deleted_message_failsafe(message.channel)
+            else:
+                print(f"Direct frame table reply error: {reply_error}", flush=True)
+    return False
+
+
 def get_daily_random_slots(day_start, count, excluded_slots=None):
     excluded_seconds = set()
     for slot in excluded_slots or []:
@@ -3181,6 +3376,8 @@ async def worker():
 
             async with message.channel.typing():
                 reply_text = await get_llm_response(llm_messages, enable_search=enable_search)
+                if reply_embeds:
+                    reply_text = sanitize_embed_followup_text(reply_text)
                 final_reply = f"{reply_prefix}\n\n{reply_text}" if reply_prefix else reply_text
                 try:
                     if reply_embeds:
@@ -3450,6 +3647,7 @@ async def on_message(message):
     hitconfirm_alias_query = bool(fd_context_payload.get("hitconfirm_alias_query"))
     super_gain_alias_query = bool(fd_context_payload.get("super_gain_alias_query"))
     property_only_query = bool(fd_context_payload.get("property_only_query"))
+    target_combo_query = bool(fd_context_payload.get("target_combo_query"))
     fallback_reply = fd_context_data if fd_context_data else None
     explicit_frame_request = (
         "framedata" in content_lower
@@ -3483,6 +3681,29 @@ async def on_message(message):
 
     
     if client.user.mentioned_in(message) or ".framedata" in content_lower:
+        if "Target Combo Options" in fd_context_data:
+            try:
+                await message.reply(fd_context_data)
+            except Exception as reply_error:
+                if is_deleted_message_reference_error(reply_error):
+                    print("Target combo options reply target deleted. Triggering failsafe.", flush=True)
+                    await send_deleted_message_failsafe(message.channel)
+                else:
+                    print(f"Target combo options reply error: {reply_error}", flush=True)
+            return
+        if "Special Strength Options" in fd_context_data:
+            try:
+                await message.reply(fd_context_data)
+            except Exception as reply_error:
+                if is_deleted_message_reference_error(reply_error):
+                    print("Special strength options reply target deleted. Triggering failsafe.", flush=True)
+                    await send_deleted_message_failsafe(message.channel)
+                else:
+                    print(f"Special strength options reply error: {reply_error}", flush=True)
+            return
+        if target_combo_query and fd_context_mode == "frame" and fd_context_rows:
+            await send_frame_table_response(message, fd_context_rows, fd_context_data)
+            return
         if super_gain_alias_query and fd_context_mode == "frame" and fd_context_rows:
             super_gain_reply = format_super_gain_only_reply(fd_context_rows)
             if super_gain_reply:
@@ -3541,6 +3762,8 @@ async def on_message(message):
                         "INSTRUCTION: The full frame table is already shown above your reply.\n"
                         " - Write a short follow-up comment (1-2 sentences) underneath the table.\n"
                         " - Do NOT reprint or restate the full table.\n"
+                        " - Do NOT output labels like Startup/Active/Recovery/On Hit/On Block/Drive/Super/Hit Confirm/Notes.\n"
+                        " - Do NOT include move lines like 'Move Name (numCmd)'.\n"
                         " - If the user asked for a comparison or takeaway, give a brief practical note using AVAILABLE DATA.\n"
                         " - If data is missing for what they asked, say you don't have the scrolls for that part.\n"
                         "CRITICAL: Do NOT invent frame data not present in AVAILABLE DATA."
@@ -3638,6 +3861,8 @@ async def on_message(message):
                     replied_context = "Has anyone improved?"
                 elif "Target Combo Options" in replied_msg.content:
                     replied_context = replied_msg.content  # capture only TC prompt
+                elif "Special Strength Options" in replied_msg.content:
+                    replied_context = replied_msg.content
 
         except discord.NotFound:
             pass
@@ -3649,23 +3874,70 @@ async def on_message(message):
     if replied_context and "Target Combo Options" in replied_context:
         match = re.search(r"Target Combo Options \(([^)]+)\)", replied_context)
         char_hint = match.group(1).strip() if match else ""
-        tc_query = content_no_mentions
+        tc_query = (content_no_mentions or "").strip()
+        tc_query_lower = tc_query.lower()
         if char_hint:
-            tc_query = f"{char_hint} {tc_query} framedata"
-        else:
-            tc_query = f"{tc_query} framedata"
+            normalized_hint = normalize_char_name(char_hint)
+            if normalized_hint not in tc_query_lower:
+                tc_query = f"{char_hint} {tc_query}".strip()
+                tc_query_lower = tc_query.lower()
+        if not re.search(r"\b(tc|target\s+combo|targetcombo)\b", tc_query_lower):
+            tc_query = f"{tc_query} target combo".strip()
+            tc_query_lower = tc_query.lower()
+        if not (
+            "framedata" in tc_query_lower
+            or "frame data" in tc_query_lower
+            or re.search(r"\bframes?\b", tc_query_lower)
+        ):
+            tc_query = f"{tc_query} framedata".strip()
         tc_payload = find_moves_in_text(tc_query.lower())
         tc_data = tc_payload.get("data", "")
-        if tc_payload.get("mode") == "frame" and tc_data:
-            replied_context = (
-                f"USER QUERY: {tc_query}\n"
-                f"AVAILABLE DATA:\n{tc_data}\n"
-                f"{MOVE_DEFINITIONS}\n"
-                "INSTRUCTION: Use the AVAILABLE DATA to answer the user's question.\n"
-                " - If the user asks for 'frame data', output the full data block VERBATIM.\n"
-                "CRITICAL: Do not invent frame data not shown in AVAILABLE DATA."
-            )
-            explicit_frame_request = True
+        tc_rows = tc_payload.get("rows", [])
+        if "Target Combo Options" in tc_data:
+            await message.reply(tc_data)
+            return
+        if tc_payload.get("mode") == "frame" and tc_rows and tc_data:
+            await send_frame_table_response(message, tc_rows, tc_data)
+            return
+
+    if replied_context and "Special Strength Options" in replied_context:
+        char_match = re.search(r"Special Strength Options \(([^)]+)\)", replied_context)
+        char_hint = char_match.group(1).strip() if char_match else ""
+        base_match = re.search(r"\n([^\n]+) variants:", replied_context)
+        base_hint = base_match.group(1).strip().lower() if base_match else ""
+
+        special_query = (content_no_mentions or "").strip()
+        raw_special_reply_lower = special_query.lower()
+        special_query_lower = raw_special_reply_lower
+        if char_hint:
+            normalized_hint = normalize_char_name(char_hint)
+            if normalized_hint not in special_query_lower:
+                special_query = f"{char_hint} {special_query}".strip()
+                special_query_lower = special_query.lower()
+
+        if base_hint and base_hint not in special_query_lower:
+            if re.fullmatch(r"(lp|mp|hp|lk|mk|hk|od|ex|light|medium|heavy|l|m|h)", raw_special_reply_lower):
+                special_query = f"{special_query} {base_hint}".strip()
+            elif not re.search(r"\b(lp|mp|hp|lk|mk|hk|od|ex|light|medium|heavy|l|m|h)\b", special_query_lower):
+                special_query = f"{special_query} {base_hint}".strip()
+            special_query_lower = special_query.lower()
+
+        if not (
+            "framedata" in special_query_lower
+            or "frame data" in special_query_lower
+            or re.search(r"\bframes?\b", special_query_lower)
+        ):
+            special_query = f"{special_query} framedata".strip()
+
+        special_payload = find_moves_in_text(special_query.lower())
+        special_data = special_payload.get("data", "")
+        special_rows = special_payload.get("rows", [])
+        if "Special Strength Options" in special_data:
+            await message.reply(special_data)
+            return
+        if special_payload.get("mode") == "frame" and special_rows and special_data:
+            await send_frame_table_response(message, special_rows, special_data)
+            return
 
 
 
