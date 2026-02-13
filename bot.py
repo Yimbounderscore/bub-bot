@@ -38,6 +38,27 @@ GEMINI_IMAGE_RESOLUTION = os.getenv('GEMINI_IMAGE_RESOLUTION', 'media_resolution
 GEMINI_VIDEO_RESOLUTION = os.getenv('GEMINI_VIDEO_RESOLUTION', 'media_resolution_low')
 MEDIA_HISTORY_LIMIT = int(os.getenv('MEDIA_HISTORY_LIMIT', '6'))
 GEMINI_MEDIA_RESOLUTION_ENABLED = "v1alpha" in GEMINI_BASE_URL.lower()
+LLM_CONTEXT_WINDOW_TOKENS = int(
+    os.getenv(
+        'LLM_CONTEXT_WINDOW_TOKENS',
+        '1000000' if GEMINI_ENABLED else '128000',
+    )
+)
+LLM_CONTEXT_HISTORY_RATIO = max(
+    0.05,
+    min(0.99, float(os.getenv('LLM_CONTEXT_HISTORY_RATIO', '0.95'))),
+)
+LLM_CONTEXT_HISTORY_MAX_MESSAGES = int(
+    os.getenv('LLM_CONTEXT_HISTORY_MAX_MESSAGES', '100')
+)
+LLM_CONTEXT_HISTORY_MAX_MESSAGES = max(1, min(100, LLM_CONTEXT_HISTORY_MAX_MESSAGES))
+LLM_CONTEXT_SAFETY_BUFFER_CHARS = int(
+    os.getenv('LLM_CONTEXT_SAFETY_BUFFER_CHARS', '12000')
+)
+LLM_CONTEXT_HISTORY_CHAR_BUDGET = max(
+    16000,
+    int(LLM_CONTEXT_WINDOW_TOKENS * LLM_CONTEXT_HISTORY_RATIO * 4),
+)
 
 DAILY_VIDEO_URL = (
     "https://cdn.discordapp.com/attachments/1345474577316319265/1467924199996915918/l3.mp4?ex=69822671&is=6980d4f1&hm=7e1208fa08199a25f9cac3dc8132696f2a9374fac61bfb2b5ae75e31f6695bea&"
@@ -58,6 +79,8 @@ ENCOURAGEMENT_PROMPTS = (
     ENCOURAGEMENT_IMPROVEMENT_PROMPT,
     ENCOURAGEMENT_ANECDOTE_PROMPT,
 )
+SCROLLS_MAINTAINER_USER_ID = 427263312217243668
+SCROLLS_FIX_REQUEST_TEXT = "please fix this or add this to my scrolls"
 DELETED_MESSAGE_FAILSAFE_PROMPT = (
     "A user tried to silence North Korean Bub by deleting their mention before a reply. "
     "Respond with one short sentence about how futile it is to try to kill or escape North Korean Bub. "
@@ -553,6 +576,43 @@ async def get_llm_response(messages, enable_search=False):
     raise RuntimeError("No LLM provider configured")
 
 
+def estimate_llm_context_history_char_budget(*parts):
+    window_chars = max(16000, LLM_CONTEXT_WINDOW_TOKENS * 4)
+    parts_chars = sum(len(str(part or "")) for part in parts)
+    reserved_chars = int(parts_chars * 1.35) + LLM_CONTEXT_SAFETY_BUFFER_CHARS
+    available_chars = window_chars - reserved_chars
+    return max(16000, min(LLM_CONTEXT_HISTORY_CHAR_BUDGET, available_chars))
+
+
+async def build_llm_context_history(message, char_budget=None):
+    context_history = []
+    consumed_chars = 0
+    budget = max(16000, int(char_budget or LLM_CONTEXT_HISTORY_CHAR_BUDGET))
+
+    async for prev_msg in message.channel.history(
+        limit=LLM_CONTEXT_HISTORY_MAX_MESSAGES,
+        before=message,
+    ):
+        msg_content = strip_discord_mentions(prev_msg.content or "").strip()
+        if not msg_content:
+            continue
+
+        msg_text = f"{prev_msg.author.display_name}: {msg_content}"
+        msg_chars = len(msg_text) + 1
+
+        if context_history and (consumed_chars + msg_chars) > budget:
+            break
+
+        context_history.append(msg_text)
+        consumed_chars += msg_chars
+
+        if consumed_chars >= budget:
+            break
+
+    context_history.reverse()
+    return context_history
+
+
 def truncate_message(text, limit=1800):
     if len(text) <= limit:
         return text
@@ -719,6 +779,9 @@ def normalize_jump_normal_text(text):
     text = re.sub(r"\bn\.?j\s*([lmh][pk])\b", r"neutral jump \1", text)
     text = re.sub(r"\bnj\s*([lmh][pk])\b", r"neutral jump \1", text)
     text = re.sub(r"\bj\s*\.?\s*([lmh][pk])\b", r"jump \1", text)
+    text = re.sub(r"\bn\.?j\s*\.?\s*([1-9][0-9]*[a-z]{1,3})\b", r"neutral j\1", text)
+    text = re.sub(r"\bnj\s*([1-9][0-9]*[a-z]{1,3})\b", r"neutral j\1", text)
+    text = re.sub(r"\bj\s*\.?\s*([1-9][0-9]*[a-z]{1,3})\b", r"j\1", text)
     return text
 
 
@@ -868,6 +931,7 @@ FRAME_STATS = {}
 BNB_DATA = {}
 OKI_DATA = {}
 CHARACTER_INFO = {}
+HITBOX_GIF_DATA = {}
 
 CHARACTER_ALIASES = {
     "kim": "kimberly",
@@ -893,6 +957,23 @@ def normalize_char_name(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(name).lower())
 
 
+def resolve_character_key(name: str):
+    """Resolve free-form character text to a FRAME_DATA key."""
+    normalized = normalize_char_name(name)
+    if not normalized:
+        return None
+
+    for char_key in FRAME_DATA.keys():
+        if normalize_char_name(char_key) == normalized:
+            return char_key
+
+    for alias, canonical in CHARACTER_ALIASES.items():
+        if normalize_char_name(alias) == normalized and canonical in FRAME_DATA:
+            return canonical
+
+    return None
+
+
 def format_sheet_text(df: pd.DataFrame) -> str:
     """Convert DataFrame rows to pipe-separated text lines."""
     df = df.fillna("")
@@ -915,7 +996,7 @@ def format_sheet_text(df: pd.DataFrame) -> str:
 
 def load_frame_data():
     """Load frame data, stats, combos, oki, and character info from ODS."""
-    global FRAME_DATA, FRAME_STATS, BNB_DATA, OKI_DATA, CHARACTER_INFO
+    global FRAME_DATA, FRAME_STATS, BNB_DATA, OKI_DATA, CHARACTER_INFO, HITBOX_GIF_DATA
     filename = "FAT - SF6 Frame Data.ods"
     
     if os.path.exists(filename):
@@ -958,10 +1039,39 @@ def load_frame_data():
             BNB_DATA = {}
             OKI_DATA = {}
             CHARACTER_INFO = {}
+            HITBOX_GIF_DATA = {}
             normalized_chars = {
                 normalize_char_name(name): name
                 for name in FRAME_DATA.keys()
             }
+
+            character_lookup = dict(normalized_chars)
+            for alias, canonical in CHARACTER_ALIASES.items():
+                if canonical in FRAME_DATA:
+                    character_lookup[normalize_char_name(alias)] = canonical
+                    character_lookup[normalize_char_name(canonical)] = canonical
+
+            gif_sheet_name = next(
+                (name for name in xls.sheet_names if name.lower() == "hitboxgiflinks"),
+                None,
+            )
+            if gif_sheet_name:
+                gif_df = pd.read_excel(xls, sheet_name=gif_sheet_name, dtype=str).fillna("")
+                for gif_row in gif_df.to_dict("records"):
+                    move_link = str(gif_row.get("moveLink", "")).strip()
+                    if not move_link:
+                        continue
+                    char_raw = str(gif_row.get("character", "")).strip()
+                    char_key = character_lookup.get(normalize_char_name(char_raw))
+                    if not char_key:
+                        continue
+                    HITBOX_GIF_DATA.setdefault(char_key, []).append({
+                        "moveName": str(gif_row.get("moveName", "")).strip(),
+                        "numCmd": str(gif_row.get("numCmd", "")).strip(),
+                        "moveLink": move_link,
+                    })
+            else:
+                print("Hitbox gif sheet not found: hitboxgiflinks")
 
             combo_sheets = [
                 name for name in xls.sheet_names
@@ -1014,6 +1124,8 @@ def load_frame_data():
             print(f"Total combo sheets loaded: {len(BNB_DATA)} characters")
             print(f"Total oki sheets loaded: {len(OKI_DATA)} characters")
             print(f"Total character info sheets loaded: {len(CHARACTER_INFO)} characters")
+            total_hitbox_gifs = sum(len(entries) for entries in HITBOX_GIF_DATA.values())
+            print(f"Total hitbox gif links loaded: {total_hitbox_gifs}")
             
         except Exception as e:
             print(f"Error loading {filename}: {e}")
@@ -1092,6 +1204,12 @@ def find_moves_in_text(text):
         "blockstun",
         "frames",
     ]
+    gif_query = bool(
+        re.search(r"\bgif(?:s)?\b", text_lower)
+        or re.search(r"\bhit\s*box(?:es)?\b", text_lower)
+        or re.search(r"\bhitbox(?:es)?\b", text_lower)
+        or ".gif" in text_lower
+    )
     startup_alias_query = bool(
         re.search(r"\bhow\s+fast\b", text_lower)
         or re.search(r"\bhow\s+quick\b", text_lower)
@@ -1165,6 +1283,7 @@ def find_moves_in_text(text):
         or hitconfirm_alias_query
         or super_gain_alias_query
         or target_combo_query
+        or gif_query
     )
     bnb_context = ""
     info_blocks = []
@@ -1178,13 +1297,29 @@ def find_moves_in_text(text):
     tc_selected_combos = set()
     tc_base_tokens = set()
     query_has_explicit_strength = False
+    explicit_move_attempt = False
+    missing_scrolls_query = False
     if wants_frame_data:
         # 2. Heuristic: For each mentioned character, search for moves mentioned nearby?
         # Simpler approach: Check if any move inputs are present in the text
         # that map to these characters.
 
+        query_requires_denjin = "denjin" in text_tokens
+
+        def row_is_denjin_variant(row):
+            move_name = str(row.get("moveName", "")).lower()
+            cmn_name = str(row.get("cmnName", "")).lower()
+            num_cmd = str(row.get("numCmd", "")).lower()
+            return (
+                "denjin" in move_name
+                or "denjin" in cmn_name
+                or "charged" in move_name
+                or "charged" in cmn_name
+                or "(charged)" in num_cmd
+            )
+
     
-        move_regex = r"\b([1-9][0-9]*[a-zA-Z]+|stand\s+[a-zA-Z]+|crouch\s+[a-zA-Z]+|(?:neutral\s+|n\s+)?jump\s+[a-zA-Z]+|(?:neutral\s+|n\s+)?j(?:\s+|\.)[a-zA-Z]+|(?:lp|mp|hp|lk|mk|hk|light|medium|heavy|l|m|h)\s+[a-zA-Z]+(?:\s+[a-zA-Z]+)?|[a-zA-Z]+\s+kick|[a-zA-Z]+\s+punch)\b"
+        move_regex = r"\b([1-9][0-9]*[a-zA-Z]+|stand\s+[a-zA-Z]+|crouch\s+[a-zA-Z]+|(?:neutral\s+|n\s+)?jump\s+[a-zA-Z]+|(?:neutral\s+|n\s+)?jump\s+[1-9][0-9]*[a-zA-Z]+|(?:neutral\s+|n\s+)?j(?:\s+|\.)[a-zA-Z]+|(?:neutral\s+|n\s+)?j(?:\s+|\.)[1-9][0-9]*[a-zA-Z]+|(?:neutral\s+|n\s+)?j\.?[1-9][0-9]*[a-zA-Z]+|(?:lp|mp|hp|lk|mk|hk|light|medium|heavy|l|m|h)\s+[a-zA-Z]+(?:\s+[a-zA-Z]+)?|[a-zA-Z]+\s+kick|[a-zA-Z]+\s+punch)\b"
         potential_inputs = re.findall(move_regex, text_lower)
         strength_prefix_pattern = re.compile(r"^(lp|mp|hp|lk|mk|hk|light|medium|heavy|l|m|h)\b")
         strength_prefixes_for_filter = [
@@ -1201,7 +1336,13 @@ def find_moves_in_text(text):
             if not cleaned_inp:
                 continue
             if not strength_prefix_pattern.match(cleaned_inp):
-                if any(f"{prefix} {cleaned_inp}" in text_lower for prefix in strength_prefixes_for_filter):
+                if any(
+                    re.search(
+                        rf"\b{re.escape(prefix)}\s+{re.escape(cleaned_inp)}\b",
+                        text_lower,
+                    )
+                    for prefix in strength_prefixes_for_filter
+                ):
                     continue
             filtered_inputs.append(cleaned_inp)
         potential_inputs = filtered_inputs
@@ -1223,35 +1364,65 @@ def find_moves_in_text(text):
             )
             return compact.startswith(motion_prefixes)
 
-        if not query_has_explicit_strength and mentioned_chars and not target_combo_query:
-            special_strength_pattern = re.compile(
-                r"^(lp|mp|hp|lk|mk|hk|od|ex|light|medium|heavy|l|m|h)\s+(.+)$"
+        command_jump_notation_present = bool(
+            re.search(
+                r"\b(?:neutral\s+|n\s+)?(?:jump\s+|j\.?\s*)[1-9][0-9]*(?:lp|mp|hp|lk|mk|hk|p|k)\b",
+                text_lower,
             )
+        )
+
+        if (
+            not query_has_explicit_strength
+            and mentioned_chars
+            and not target_combo_query
+            and not command_jump_notation_present
+        ):
             seen_special_prompts = set()
             for char in mentioned_chars:
                 special_base_map = {}
                 for row in FRAME_DATA.get(char, []):
                     if not is_special_motion_num_cmd(row.get("numCmd", "")):
                         continue
-                    row_names = [str(row.get("cmnName", "")).lower().strip(), str(row.get("moveName", "")).lower().strip()]
-                    for raw_name in row_names:
-                        if not raw_name:
-                            continue
-                        strength_match = special_strength_pattern.match(raw_name)
-                        if not strength_match:
-                            continue
-                        base_name = strength_match.group(2).strip()
-                        if not base_name:
-                            continue
-                        special_base_map.setdefault(base_name, [])
-                        if row not in special_base_map[base_name]:
-                            special_base_map[base_name].append(row)
+                    raw_name = str(row.get("cmnName", "")).lower().strip()
+                    if not raw_name:
+                        raw_name = str(row.get("moveName", "")).lower().strip()
+                    if not raw_name:
+                        continue
+                    base_name = re.sub(r"^(od|ex)\s+", "", raw_name)
+                    base_name = re.sub(
+                        r"^(lp|mp|hp|lk|mk|hk|pp|kk|light|medium|heavy|l|m|h)\s+",
+                        "",
+                        base_name,
+                    ).strip()
+                    canonical_base = re.sub(r"\s*\(charged\)", "", base_name).strip()
+                    if not canonical_base:
+                        continue
+                    special_base_map.setdefault(canonical_base, [])
+                    if row not in special_base_map[canonical_base]:
+                        special_base_map[canonical_base].append(row)
 
                 for base_name, variants in special_base_map.items():
-                    if len(variants) < 2:
+                    prompt_variants = variants
+                    if query_requires_denjin:
+                        denjin_variants = [row for row in variants if row_is_denjin_variant(row)]
+                        if denjin_variants:
+                            prompt_variants = denjin_variants
+                        else:
+                            continue
+                    if len(prompt_variants) < 2:
                         continue
                     base_tokens = re.findall(r"[a-z0-9]+", base_name)
                     base_in_query = tokens_in_text(base_tokens)
+                    if not base_in_query and base_name == "fireball":
+                        base_in_query = "hadoken" in text_tokens or "hadouken" in text_tokens
+                    if not base_in_query and base_name == "palm thrust":
+                        base_in_query = "hashogeki" in text_tokens
+                    if not base_in_query and base_name == "super art level 1":
+                        base_in_query = bool(re.search(r"\bsa\s*1\b", text_lower))
+                    if not base_in_query and base_name == "super art level 2":
+                        base_in_query = bool(re.search(r"\bsa\s*2\b", text_lower))
+                    if not base_in_query and base_name == "super art level 3":
+                        base_in_query = bool(re.search(r"\bsa\s*3\b", text_lower))
                     if not base_in_query and base_name == "spd":
                         base_in_query = "command" in text_tokens and "grab" in text_tokens
                     if not base_in_query:
@@ -1262,7 +1433,7 @@ def find_moves_in_text(text):
                     seen_special_prompts.add(prompt_key)
                     variant_lines = "\n".join(
                         f"- {row.get('moveName', '?')} ({row.get('numCmd', '?')})"
-                        for row in variants
+                        for row in prompt_variants
                     )
                     special_prompt_blocks.append(
                         f"**Special Strength Options ({char.capitalize()})**\n"
@@ -1310,6 +1481,20 @@ def find_moves_in_text(text):
             extra_inputs.append("sway")
         if "jus cool" in text_lower or "juscool" in text_lower:
             extra_inputs.append("jus cool")
+        has_od_denjin_fireball = bool(
+            re.search(r"\b(ex|od)\s+denjin\s+(fireball|hadoken|hadouken)\b", text_lower)
+        )
+        if has_od_denjin_fireball:
+            if "od denjin fireball" not in extra_inputs:
+                extra_inputs.append("od denjin fireball")
+        elif re.search(r"\bdenjin\s+(fireball|hadoken|hadouken)\b", text_lower):
+            if "denjin fireball" not in extra_inputs:
+                extra_inputs.append("denjin fireball")
+        sa_alias_matches = re.findall(r"\bsa\s*([123])\b", text_lower)
+        for sa_level in sa_alias_matches:
+            sa_token = f"sa{sa_level}"
+            if sa_token not in extra_inputs:
+                extra_inputs.append(sa_token)
         # 46P charge patterns (back-forward+punch)
         charge_patterns = [
             (r"\b46p\b", "46p"),
@@ -1498,6 +1683,30 @@ def find_moves_in_text(text):
                 ordered_inputs.append(inp)
         potential_inputs = ordered_inputs
 
+        explicit_move_attempt = bool(potential_inputs or extra_inputs)
+        if not explicit_move_attempt and mentioned_chars:
+            stop_tokens = {
+                "frame", "frames", "framedata", "data", "startup", "recovery", "active",
+                "on", "hit", "block", "compare", "comparison", "versus", "vs", "which",
+                "is", "faster", "better", "tc", "target", "combo", "combos", "how", "fast",
+                "quick", "speed", "of", "the", "a", "an", "for", "with", "please", "show",
+                "tell", "me", "about", "can", "i", "punish", "punishable", "stats",
+                "send", "post", "drop", "give", "link",
+                "gif", "gifs", "hitbox", "hitboxes",
+            }
+            char_tokens = set()
+            for char in mentioned_chars:
+                char_tokens.update(re.findall(r"[a-z0-9]+", str(char).lower()))
+                normalized_char = normalize_char_name(char)
+                if normalized_char:
+                    char_tokens.add(normalized_char)
+            residual_tokens = [
+                tok for tok in text_tokens
+                if tok not in stop_tokens and tok not in char_tokens
+            ]
+            if residual_tokens:
+                explicit_move_attempt = True
+
         strength_prefix_re = re.compile(r"^(?:lp|mp|hp|lk|mk|hk|pp|kk|od|ex|light|medium|heavy|l|m|h)\s+")
         text_compact = re.sub(r"[^a-z0-9]", "", text_lower)
 
@@ -1528,6 +1737,9 @@ def find_moves_in_text(text):
                     ):
                         candidate_names.append(stripped_name)
                     for candidate_name in candidate_names:
+                        candidate_has_strength_prefix = bool(strength_prefix_re.match(candidate_name))
+                        if query_has_explicit_strength and not candidate_has_strength_prefix:
+                            continue
                         candidate_tokens = re.findall(r"[a-z0-9]+", candidate_name)
                         if not candidate_tokens:
                             continue
@@ -1660,7 +1872,29 @@ def find_moves_in_text(text):
                         results.append(row)
                     break  # Only match one typhoon variant
 
-    if special_prompt_blocks and not query_has_explicit_strength:
+        if special_grab_query and query_has_explicit_strength and not results and mentioned_chars:
+            for char in mentioned_chars:
+                grab_variants = []
+                for row in FRAME_DATA.get(char, []):
+                    cmn_name = str(row.get("cmnName", "")).lower()
+                    if "command grab" in cmn_name or re.search(r"\bspd\b", cmn_name):
+                        grab_variants.append(row)
+                if len(grab_variants) >= 2:
+                    variant_lines = "\n".join(
+                        f"- {row.get('moveName', '?')} ({row.get('numCmd', '?')})"
+                        for row in grab_variants
+                    )
+                    special_prompt_blocks.append(
+                        f"**Special Strength Options ({char.capitalize()})**\n"
+                        f"Command Grab variants:\n{variant_lines}\n"
+                        "Reply or make a new prompt with the exact strength+move."
+                    )
+
+        if query_requires_denjin and results:
+            denjin_results = [row for row in results if row_is_denjin_variant(row)]
+            results = denjin_results
+
+    if special_prompt_blocks and (not query_has_explicit_strength or (special_grab_query and not results)):
         results = []
 
     if target_combo_query:
@@ -1693,6 +1927,8 @@ def find_moves_in_text(text):
     wants_stats = any(k in text_lower for k in stats_keywords)
     if startup_alias_query and re.search(r"\b[1-9][0-9]*[a-zA-Z]{1,3}\b", text_lower):
         wants_stats = False
+    if wants_frame_data and explicit_move_attempt:
+        wants_stats = False
     
     if wants_stats:
         for char in mentioned_chars:
@@ -1724,13 +1960,30 @@ def find_moves_in_text(text):
     # If we have a character but NO specific moves found (e.g. "Help me with Ryu"),
     # the LLM will try to give advice about buttons. We MUST provide the data for those likely buttons
     # to prevent hallucinations (like saying 5MK is special cancellable when it isn't).
-    if wants_frame_data and mentioned_chars and not results and not target_combo_query and not special_prompt_blocks:
+    if (
+        wants_frame_data
+        and mentioned_chars
+        and not results
+        and not target_combo_query
+        and not special_prompt_blocks
+        and not explicit_move_attempt
+    ):
         key_moves = ["5MP", "5MK", "2MK", "5HP", "2HP", "5HK", "2HK"]
         for char in mentioned_chars:
             for km in key_moves:
                 k_row = lookup_frame_data(char, km)
                 if k_row and k_row not in results:
                     results.append(k_row)
+
+    if (
+        wants_frame_data
+        and mentioned_chars
+        and explicit_move_attempt
+        and not results
+        and not tc_prompt_blocks
+        and not special_prompt_blocks
+    ):
+        missing_scrolls_query = True
 
     has_results = bool(results)
 
@@ -1842,6 +2095,9 @@ def find_moves_in_text(text):
         "super_gain_alias_query": super_gain_alias_query,
         "property_only_query": property_only_query,
         "target_combo_query": target_combo_query,
+        "missing_scrolls_query": missing_scrolls_query,
+        "gif_query": gif_query,
+        "explicit_move_attempt": explicit_move_attempt,
     }
 
 
@@ -1873,6 +2129,7 @@ def lookup_frame_data(character, move_input):
         return text
 
     move_input = normalize_strength_word_shorthand(move_input)
+    move_input = re.sub(r"^(?:7|9)\s*(lp|mp|hp|lk|mk|hk)$", r"jump \1", move_input)
 
     original_move_input = move_input
     neutral_tokens = []
@@ -2121,6 +2378,14 @@ def lookup_frame_data(character, move_input):
         "shoryuken": "623",
         "hadoken": "fireball",
         "hadouken": "fireball",
+        "denjin fireball": "denjin hadoken",
+        "ex denjin fireball": "od denjin hadoken",
+        "od denjin fireball": "od denjin hadoken",
+        "ex denjin hadoken": "od denjin hadoken",
+        # Global Super Art level aliases
+        "sa1": "super art level 1",
+        "sa2": "super art level 2",
+        "sa3": "super art level 3",
         "sway": "juggling sway",
         "juggling sway": "juggling sway",
         "jus cool": "jus cool",
@@ -2398,7 +2663,100 @@ def lookup_frame_data(character, move_input):
             "medium sbk": "mk spinning bird kick",
             "heavy sbk": "hk spinning bird kick",
         },
+        "cammy": {
+            # Hooligan > Throw (command grab)
+            "command grab": "hooligan > throw",
+            "hooligan throw": "hooligan > throw",
+            "hooligan > throw": "hooligan > throw",
+            "ex command grab": "od hooligan > throw",
+            "od command grab": "od hooligan > throw",
+            "ex hooligan throw": "od hooligan > throw",
+            "od hooligan throw": "od hooligan > throw",
+            "h command grab": "hp hooligan (hold) > throw",
+            "hp command grab": "hp hooligan (hold) > throw",
+            "hooligan hold throw": "hp hooligan (hold) > throw",
+        },
+        "zangief": {
+            # Neutral jump HP -> Flying Headbutt
+            "8hp": "flying headbutt",
+            "8 hp": "flying headbutt",
+            "njhp": "flying headbutt",
+            "nj.hp": "flying headbutt",
+            "n jhp": "flying headbutt",
+            "n j.hp": "flying headbutt",
+            "neutral jhp": "flying headbutt",
+            "neutral j.hp": "flying headbutt",
+            "neutral jump hp": "flying headbutt",
+            "neutral jump heavy punch": "flying headbutt",
+            "flying headbutt": "flying headbutt",
+            "air headbutt": "flying headbutt",
+        },
     }
+
+    COMMAND_JUMP_NORMAL_ALIASES = {
+        "a.k.i": {
+            "j2hp": "gong fu",
+            "j.2hp": "gong fu",
+            "jump 2hp": "gong fu",
+        },
+        "akuma": {
+            "j2mk": "tenmaku blade kick",
+            "j.2mk": "tenmaku blade kick",
+            "jump 2mk": "tenmaku blade kick",
+        },
+        "chun-li": {
+            "j2mk": "yoso kick",
+            "j.2mk": "yoso kick",
+            "jump 2mk": "yoso kick",
+        },
+        "dee jay": {
+            "j2lk": "knee shot",
+            "j.2lk": "knee shot",
+            "jump 2lk": "knee shot",
+        },
+        "dhalsim": {
+            "j2lp": "yoga mummy",
+            "j.2lp": "yoga mummy",
+            "jump 2lp": "yoga mummy",
+            "j2k": "lk drill kick",
+            "j.2k": "lk drill kick",
+            "jump 2k": "lk drill kick",
+            "j2lk": "lk drill kick",
+            "j2mk": "mk drill kick",
+            "j2hk": "hk drill kick",
+        },
+        "e.honda": {
+            "j2mk": "flying sumo press",
+            "j.2mk": "flying sumo press",
+            "jump 2mk": "flying sumo press",
+        },
+        "lily": {
+            "j2hp": "great spin",
+            "j.2hp": "great spin",
+            "jump 2hp": "great spin",
+        },
+        "rashid": {
+            "j2hp": "blitz strike",
+            "j.2hp": "blitz strike",
+            "jump 2hp": "blitz strike",
+        },
+        "zangief": {
+            "j2hp": "flying body press",
+            "j.2hp": "flying body press",
+            "jump 2hp": "flying body press",
+        },
+        "kimberly": {
+            "j2mp": "elbow drop",
+            "j.2mp": "elbow drop",
+            "jump 2mp": "elbow drop",
+            "j2mp elbow": "elbow drop",
+            "j2mp(elbow)": "elbow drop",
+        },
+    }
+    for alias_char, alias_map in COMMAND_JUMP_NORMAL_ALIASES.items():
+        if alias_char not in CHARACTER_INPUT_ALIASES:
+            CHARACTER_INPUT_ALIASES[alias_char] = {}
+        CHARACTER_INPUT_ALIASES[alias_char].update(alias_map)
 
     DP_PREFIX_EXCEPTIONS = {
         "marisa": ["phalanx"],
@@ -2455,6 +2813,480 @@ def lookup_frame_data(character, move_input):
                 return row
             
     return None
+
+
+def compact_move_token(value):
+    return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+
+def normalize_num_cmd_token(value):
+    normalized = re.sub(r"\([^)]*\)", "", str(value or "").lower())
+    normalized = re.sub(r"\s+", "", normalized)
+    return re.sub(r"[^a-z0-9>]", "", normalized)
+
+
+def extract_button_suffix(num_cmd_token):
+    token = str(num_cmd_token or "")
+    match = re.search(r"(lp|mp|hp|lk|mk|hk|pp|kk|p|k)$", token)
+    return match.group(1) if match else ""
+
+
+def normalize_move_name_for_gif_text(value):
+    text = str(value or "").lower()
+    text = re.sub(r"\b6\s*h\s*p\s*\+\s*h\s*k\b", "drive reversal", text)
+    text = re.sub(r"\b6hphk\b", "drive reversal", text)
+    text = re.sub(r"\b5\s*h\s*p\s*\+\s*h\s*k\b", "drive impact", text)
+    text = re.sub(r"\b5hphk\b", "drive impact", text)
+    text = re.sub(r"\bh\s*p\s*\+\s*h\s*k\b", "drive impact", text)
+    text = re.sub(r"\bhphk\b", "drive impact", text)
+    text = re.sub(r"\bdi\b", "drive impact", text)
+    text = re.sub(r"\bdrev\b", "drive reversal", text)
+    text = re.sub(r"\bdrive\s+rev\b", "drive reversal", text)
+    text = re.sub(r"\bcr\.?\b", "crouching", text)
+    text = re.sub(r"\bidling\b", "idle", text)
+    text = re.sub(r"\bidle\b", "standing", text)
+    text = re.sub(r"\bstand\b", "standing", text)
+    text = re.sub(r"\bbackdash\b", "backward dash", text)
+    text = re.sub(r"\bdash\s+back\b", "backward dash", text)
+    text = re.sub(r"\bback\s+dash\b", "backward dash", text)
+    text = re.sub(r"\bdash\s+forward\b", "forward dash", text)
+    text = re.sub(r"\bfwd\b", "forward", text)
+    text = re.sub(r"\bdr\b", "drive rush", text)
+    text = text.replace("jumping", "jump")
+    text = text.replace("standing", "stand")
+    text = text.replace("crouching", "crouch")
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    raw_tokens = [tok for tok in text.split() if tok]
+    if not raw_tokens:
+        return ""
+
+    token_map = {
+        "lp": "l",
+        "lk": "l",
+        "light": "l",
+        "l": "l",
+        "mp": "m",
+        "mk": "m",
+        "medium": "m",
+        "m": "m",
+        "hp": "h",
+        "hk": "h",
+        "heavy": "h",
+        "h": "h",
+        "ex": "od",
+    }
+    drop_tokens = {"punch", "kick", "button", "normal", "attack", "move"}
+    normalized_tokens = []
+    for token in raw_tokens:
+        mapped = token_map.get(token, token)
+        if mapped in drop_tokens:
+            continue
+        normalized_tokens.append(mapped)
+    return " ".join(normalized_tokens).strip()
+
+
+def move_name_match_tokens(move_name, num_cmd=""):
+    token_set = set()
+    name_norm = normalize_move_name_for_gif_text(move_name)
+    if name_norm:
+        token_set.update(name_norm.split())
+
+    num_cmd_norm = normalize_num_cmd_token(num_cmd)
+    suffix = extract_button_suffix(num_cmd_norm)
+    strength_token_map = {
+        "lp": "l",
+        "lk": "l",
+        "mp": "m",
+        "mk": "m",
+        "hp": "h",
+        "hk": "h",
+        "p": "p",
+        "k": "k",
+        "pp": "od",
+        "kk": "od",
+    }
+    if suffix:
+        token_set.add(suffix)
+        mapped_strength = strength_token_map.get(suffix)
+        if mapped_strength:
+            token_set.add(mapped_strength)
+
+    if num_cmd_norm.startswith(("7", "8", "9")) and ">" not in num_cmd_norm:
+        token_set.add("jump")
+
+    return token_set
+
+
+def build_num_cmd_candidates_for_gif(row):
+    row_num_cmd = normalize_num_cmd_token(row.get("numCmd", ""))
+    candidates = set()
+    if row_num_cmd:
+        candidates.add(row_num_cmd)
+
+    row_suffix = extract_button_suffix(row_num_cmd)
+    move_name_lower = str(row.get("moveName", "")).lower()
+    cmn_name_lower = str(row.get("cmnName", "")).lower()
+
+    if row_suffix and "jump" in move_name_lower and ">" not in row_num_cmd:
+        for prefix in ("7", "8", "9"):
+            candidates.add(f"{prefix}{row_suffix}")
+
+    if row_suffix and row_num_cmd.startswith("4268"):
+        candidates.add(f"9{row_suffix}")
+        if row_num_cmd.startswith("42684268"):
+            candidates.add(f"99{row_suffix}")
+
+    if row_suffix and "air" in cmn_name_lower and row_num_cmd.startswith("4268"):
+        candidates.add(f"9{row_suffix}")
+
+    return candidates
+
+
+def lookup_hitbox_gif_link(row):
+    row_char = str(row.get("char_name", "")).strip()
+    char_key = resolve_character_key(row_char)
+    if not char_key:
+        return None
+
+    gif_rows = HITBOX_GIF_DATA.get(char_key, [])
+    if not gif_rows:
+        return None
+
+    row_num_cmd = normalize_num_cmd_token(row.get("numCmd", ""))
+    row_suffix = extract_button_suffix(row_num_cmd)
+    row_move_name_norm = normalize_move_name_for_gif_text(row.get("moveName", ""))
+    row_cmn_name_norm = normalize_move_name_for_gif_text(row.get("cmnName", ""))
+    row_tokens = set()
+    row_tokens.update(move_name_match_tokens(row.get("moveName", ""), row.get("numCmd", "")))
+    row_tokens.update(move_name_match_tokens(row.get("cmnName", ""), row.get("numCmd", "")))
+    num_cmd_candidates = build_num_cmd_candidates_for_gif(row)
+    row_is_jump = "jump" in row_tokens
+
+    best_score = -1
+    best_link = None
+
+    for gif_row in gif_rows:
+        move_link = str(gif_row.get("moveLink", "")).strip()
+        if not move_link:
+            continue
+
+        gif_num_cmd = normalize_num_cmd_token(gif_row.get("numCmd", ""))
+        gif_suffix = extract_button_suffix(gif_num_cmd)
+        gif_name_norm = normalize_move_name_for_gif_text(gif_row.get("moveName", ""))
+        gif_tokens = move_name_match_tokens(gif_row.get("moveName", ""), gif_row.get("numCmd", ""))
+        gif_is_jump = "jump" in gif_tokens
+
+        score = 0
+
+        overlap = len(row_tokens & gif_tokens)
+        if overlap:
+            score += overlap * 12
+            score += int((overlap / max(len(row_tokens), 1)) * 10)
+
+        if row_move_name_norm and gif_name_norm:
+            if row_move_name_norm == gif_name_norm:
+                score += 35
+            elif row_move_name_norm in gif_name_norm or gif_name_norm in row_move_name_norm:
+                score += 18
+
+        if row_cmn_name_norm and gif_name_norm:
+            if row_cmn_name_norm == gif_name_norm:
+                score += 22
+            elif row_cmn_name_norm in gif_name_norm or gif_name_norm in row_cmn_name_norm:
+                score += 10
+
+        if row_num_cmd and gif_num_cmd == row_num_cmd:
+            score += 28
+
+        if gif_num_cmd and gif_num_cmd in num_cmd_candidates:
+            score += 18
+
+        if row_suffix and gif_suffix and row_suffix == gif_suffix:
+            score += 10
+
+        if row_is_jump == gif_is_jump:
+            score += 8
+        else:
+            score -= 8
+
+        if score > best_score:
+            best_score = score
+            best_link = move_link
+
+    if best_link and best_score >= 20:
+        return best_link
+
+    return None
+
+
+def collect_hitbox_gif_links(rows, limit=3):
+    links = []
+    seen = set()
+    for row in rows:
+        move_link = lookup_hitbox_gif_link(row)
+        if not move_link or move_link in seen:
+            continue
+        seen.add(move_link)
+        links.append(move_link)
+        if len(links) >= limit:
+            break
+    return links
+
+
+def find_characters_in_text(text):
+    text_lower = strip_discord_mentions(text).lower()
+    tokens = re.findall(r"[a-z0-9]+", text_lower)
+
+    def has_token_sequence(sequence):
+        if not sequence:
+            return False
+        seq_len = len(sequence)
+        for idx in range(len(tokens) - seq_len + 1):
+            if tokens[idx:idx + seq_len] == sequence:
+                return True
+        return False
+
+    found = []
+    alias_items = sorted(
+        CHARACTER_ALIASES.items(),
+        key=lambda item: len(re.findall(r"[a-z0-9]+", item[0])),
+        reverse=True,
+    )
+    for alias, canonical in alias_items:
+        if canonical not in FRAME_DATA:
+            continue
+        alias_tokens = re.findall(r"[a-z0-9]+", alias.lower())
+        if has_token_sequence(alias_tokens) and canonical not in found:
+            found.append(canonical)
+
+    for char_key in FRAME_DATA.keys():
+        char_tokens = re.findall(r"[a-z0-9]+", str(char_key).lower())
+        if has_token_sequence(char_tokens) and char_key not in found:
+            found.append(char_key)
+
+    return found
+
+
+def remove_first_token_sequence(tokens, sequence):
+    if not sequence:
+        return tokens, False
+    seq_len = len(sequence)
+    for idx in range(len(tokens) - seq_len + 1):
+        if tokens[idx:idx + seq_len] == sequence:
+            return tokens[:idx] + tokens[idx + seq_len:], True
+    return tokens, False
+
+
+def extract_gif_move_query_text(text, char_key):
+    tokens = re.findall(r"[a-z0-9]+", strip_discord_mentions(text).lower())
+
+    alias_forms = {char_key}
+    for alias, canonical in CHARACTER_ALIASES.items():
+        if canonical == char_key:
+            alias_forms.add(alias)
+
+    alias_sequences = sorted(
+        [tuple(re.findall(r"[a-z0-9]+", form.lower())) for form in alias_forms],
+        key=len,
+        reverse=True,
+    )
+    alias_sequences = [seq for seq in alias_sequences if seq]
+
+    for sequence in alias_sequences:
+        tokens, _ = remove_first_token_sequence(tokens, list(sequence))
+
+    filler_tokens = {
+        "send", "show", "post", "drop", "give", "get", "share", "link",
+        "gif", "gifs", "hitbox", "hitboxes", "the", "a", "an", "me",
+        "please", "can", "you", "for", "of", "to", "with", "and",
+        "korean", "bub",
+    }
+    filtered_tokens = [tok for tok in tokens if tok not in filler_tokens]
+    return " ".join(filtered_tokens).strip()
+
+
+def lookup_hitbox_gif_links_from_query(char_key, move_query, limit=3):
+    gif_rows = HITBOX_GIF_DATA.get(char_key, [])
+    if not gif_rows:
+        return []
+
+    query_raw = str(move_query or "").strip().lower()
+    if not query_raw:
+        return []
+
+    query_num_cmd = normalize_num_cmd_token(query_raw)
+    query_name_norm = normalize_move_name_for_gif_text(query_raw)
+    query_tokens = set(query_name_norm.split())
+    query_tokens.update(move_name_match_tokens(query_raw, query_num_cmd))
+    if query_num_cmd:
+        query_tokens.add(query_num_cmd)
+
+    scored_links = []
+    for gif_row in gif_rows:
+        move_link = str(gif_row.get("moveLink", "")).strip()
+        if not move_link:
+            continue
+
+        gif_num_cmd = normalize_num_cmd_token(gif_row.get("numCmd", ""))
+        gif_name_norm = normalize_move_name_for_gif_text(gif_row.get("moveName", ""))
+        gif_tokens = move_name_match_tokens(gif_row.get("moveName", ""), gif_row.get("numCmd", ""))
+        if gif_num_cmd:
+            gif_tokens.add(gif_num_cmd)
+
+        score = 0
+
+        if query_num_cmd and gif_num_cmd == query_num_cmd:
+            score += 80
+        elif query_num_cmd and len(query_num_cmd) >= 2 and query_num_cmd in gif_num_cmd:
+            score += 25
+
+        if query_num_cmd.endswith("hphk") and gif_num_cmd.endswith("hphk"):
+            score += 30
+        if query_num_cmd in {"hphk", "5hphk"}:
+            if gif_num_cmd.startswith("5"):
+                score += 20
+            if "impact" in gif_tokens:
+                score += 12
+            if "reversal" in gif_tokens:
+                score += 4
+        if query_num_cmd == "6hphk":
+            if gif_num_cmd.startswith("6"):
+                score += 22
+            if "reversal" in gif_tokens:
+                score += 12
+
+        if query_name_norm and gif_name_norm:
+            if query_name_norm == gif_name_norm:
+                score += 55
+            elif query_name_norm in gif_name_norm or gif_name_norm in query_name_norm:
+                score += 25
+
+        overlap = len(query_tokens & gif_tokens)
+        if overlap:
+            score += overlap * 12
+
+        if "dash" in query_tokens:
+            score += 20 if "dash" in gif_tokens else -8
+            if "forward" not in query_tokens and "backward" not in query_tokens:
+                if "forward" in gif_tokens and "dash" in gif_tokens:
+                    score += 10
+                if "backward" in gif_tokens and "dash" in gif_tokens:
+                    score += 6
+        if "forward" in query_tokens and "forward" in gif_tokens:
+            score += 12
+        if "backward" in query_tokens and "backward" in gif_tokens:
+            score += 12
+        if "drive" in query_tokens and "drive" in gif_tokens:
+            score += 12
+        if "rush" in query_tokens and "rush" in gif_tokens:
+            score += 12
+        if ("stand" in query_tokens or "standing" in query_tokens) and ("stand" in gif_tokens or "standing" in gif_tokens):
+            score += 20
+
+        if query_num_cmd == "66":
+            if "drive" in query_tokens or "rush" in query_tokens:
+                if "drive" in gif_tokens and "rush" in gif_tokens:
+                    score += 16
+            else:
+                if "forward" in gif_tokens and "dash" in gif_tokens:
+                    score += 22
+        if query_num_cmd == "44" and "backward" in gif_tokens and "dash" in gif_tokens:
+            score += 22
+        if query_num_cmd == "5" and ("stand" in gif_tokens or "standing" in gif_tokens):
+            score += 22
+
+        if score > 0:
+            scored_links.append((score, move_link))
+
+    if not scored_links:
+        return []
+
+    scored_links.sort(key=lambda item: item[0], reverse=True)
+    top_score = scored_links[0][0]
+    if top_score < 20:
+        return []
+
+    resolved_links = []
+    seen = set()
+    for score, move_link in scored_links:
+        if score < max(top_score - 18, 20):
+            continue
+        if move_link in seen:
+            continue
+        seen.add(move_link)
+        resolved_links.append(move_link)
+        if len(resolved_links) >= limit:
+            break
+
+    return resolved_links
+
+
+def collect_hitbox_gif_links_from_text(text, frame_rows=None, limit=3):
+    links = []
+    seen = set()
+
+    text_lower = strip_discord_mentions(text).lower()
+    normalized_query = normalize_move_name_for_gif_text(text_lower)
+    normalized_tokens = set(normalized_query.split())
+    normalized_num_cmd = normalize_num_cmd_token(text_lower)
+
+    query_prefers_text_match = bool(
+        normalized_tokens & {
+            "drive", "impact", "rush", "reversal",
+            "dash", "forward", "backward",
+            "stand", "standing", "crouch", "crouching", "idle",
+        }
+        or "hphk" in normalized_num_cmd
+    )
+
+    char_candidates = []
+    for row in frame_rows or []:
+        row_char = str(row.get("char_name", "")).strip()
+        char_key = resolve_character_key(row_char)
+        if char_key and char_key not in char_candidates:
+            char_candidates.append(char_key)
+
+    for char_key in find_characters_in_text(text):
+        if char_key not in char_candidates:
+            char_candidates.append(char_key)
+
+    def add_frame_row_links():
+        for row in frame_rows or []:
+            move_link = lookup_hitbox_gif_link(row)
+            if not move_link or move_link in seen:
+                continue
+            seen.add(move_link)
+            links.append(move_link)
+            if len(links) >= limit:
+                return True
+        return False
+
+    def add_query_links():
+        for char_key in char_candidates:
+            move_query = extract_gif_move_query_text(text, char_key)
+            if not move_query:
+                continue
+            query_links = lookup_hitbox_gif_links_from_query(char_key, move_query, limit=limit)
+            for move_link in query_links:
+                if move_link in seen:
+                    continue
+                seen.add(move_link)
+                links.append(move_link)
+                if len(links) >= limit:
+                    return True
+        return False
+
+    if query_prefers_text_match:
+        if add_query_links():
+            return links
+        add_frame_row_links()
+        return links
+
+    if add_frame_row_links():
+        return links
+    add_query_links()
+
+    return links
 
 def check_punish(text_lower, results):
     """Calculate if Move B can punish Move A based on frame advantage."""
@@ -3648,7 +4480,14 @@ async def on_message(message):
     super_gain_alias_query = bool(fd_context_payload.get("super_gain_alias_query"))
     property_only_query = bool(fd_context_payload.get("property_only_query"))
     target_combo_query = bool(fd_context_payload.get("target_combo_query"))
+    missing_scrolls_query = bool(fd_context_payload.get("missing_scrolls_query"))
+    gif_query = bool(fd_context_payload.get("gif_query"))
+    explicit_move_attempt = bool(fd_context_payload.get("explicit_move_attempt"))
     fallback_reply = fd_context_data if fd_context_data else None
+
+    if gif_query and not client.user.mentioned_in(message):
+        return
+
     explicit_frame_request = (
         "framedata" in content_lower
         or "frame data" in content_lower
@@ -3680,7 +4519,67 @@ async def on_message(message):
     
 
     
-    if client.user.mentioned_in(message) or ".framedata" in content_lower:
+    should_handle_direct_frame = (
+        client.user.mentioned_in(message)
+        or ".framedata" in content_lower
+    )
+
+    if should_handle_direct_frame:
+        if gif_query and client.user.mentioned_in(message) and (
+            fd_context_rows
+            or missing_scrolls_query
+            or ".gif" in content_lower
+            or ".hitbox" in content_lower
+        ):
+            if not explicit_move_attempt:
+                await message.reply("Tell me the exact move too, like 'aki 5hp gif'.")
+                return
+
+            gif_links = collect_hitbox_gif_links_from_text(
+                content_no_mentions,
+                frame_rows=fd_context_rows,
+                limit=3,
+            )
+            if gif_links:
+                try:
+                    await message.reply(gif_links[0])
+                except Exception as reply_error:
+                    if is_deleted_message_reference_error(reply_error):
+                        print("Hitbox gif reply target deleted. Triggering failsafe.", flush=True)
+                        await send_deleted_message_failsafe(message.channel)
+                    else:
+                        print(f"Hitbox gif reply error: {reply_error}", flush=True)
+                return
+
+            if fd_context_rows:
+                missing_gif_msg = (
+                    f"I have frame data for that move but no hitbox gif link yet. "
+                    f"<@{SCROLLS_MAINTAINER_USER_ID}> {SCROLLS_FIX_REQUEST_TEXT}"
+                )
+                try:
+                    await message.reply(missing_gif_msg)
+                except Exception as reply_error:
+                    if is_deleted_message_reference_error(reply_error):
+                        print("Missing-gif reply target deleted. Triggering failsafe.", flush=True)
+                        await send_deleted_message_failsafe(message.channel)
+                    else:
+                        print(f"Missing-gif reply error: {reply_error}", flush=True)
+                return
+
+        if missing_scrolls_query:
+            missing_msg = (
+                f"I don't have the scrolls for that move. "
+                f"<@{SCROLLS_MAINTAINER_USER_ID}> {SCROLLS_FIX_REQUEST_TEXT}"
+            )
+            try:
+                await message.reply(missing_msg)
+            except Exception as reply_error:
+                if is_deleted_message_reference_error(reply_error):
+                    print("Missing-scrolls reply target deleted. Triggering failsafe.", flush=True)
+                    await send_deleted_message_failsafe(message.channel)
+                else:
+                    print(f"Missing-scrolls reply error: {reply_error}", flush=True)
+            return
         if "Target Combo Options" in fd_context_data:
             try:
                 await message.reply(fd_context_data)
@@ -3906,16 +4805,104 @@ async def on_message(message):
         base_match = re.search(r"\n([^\n]+) variants:", replied_context)
         base_hint = base_match.group(1).strip().lower() if base_match else ""
 
+        option_matches = []
+        raw_option_pairs = re.findall(r"([^()]+?)\s*\(([^)]+)\)", replied_context)
+        for raw_name, raw_cmd in raw_option_pairs:
+            option_name = raw_name.strip()
+            option_cmd = raw_cmd.strip()
+            option_name_lower = option_name.lower()
+            if option_name_lower.startswith("special strength options"):
+                continue
+            if "variants:" in option_name_lower:
+                option_name = option_name.split(":", 1)[1].strip()
+            option_name = re.sub(r"^[\s\-•·]+", "", option_name).strip()
+            if not option_name:
+                continue
+            option_matches.append((option_name, option_cmd))
+
+        def compact_token(value):
+            return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+        strength_aliases = {
+            "l": {"lp", "lk", "light"},
+            "light": {"lp", "lk", "light"},
+            "m": {"mp", "mk", "medium"},
+            "medium": {"mp", "mk", "medium"},
+            "h": {"hp", "hk", "heavy"},
+            "heavy": {"hp", "hk", "heavy"},
+            "lp": {"lp", "light"},
+            "mp": {"mp", "medium"},
+            "hp": {"hp", "heavy"},
+            "lk": {"lk", "light"},
+            "mk": {"mk", "medium"},
+            "hk": {"hk", "heavy"},
+            "od": {"od", "ex", "pp", "kk"},
+            "ex": {"od", "ex", "pp", "kk"},
+        }
+
         special_query = (content_no_mentions or "").strip()
         raw_special_reply_lower = special_query.lower()
         special_query_lower = raw_special_reply_lower
+
+        selected_option_name = None
+        selected_option_cmd = None
+        reply_compact = compact_token(raw_special_reply_lower)
+        if option_matches and reply_compact:
+            exact_option_matches = []
+            for option_name, option_cmd in option_matches:
+                option_name_lower = option_name.lower()
+                option_name_fireball_alias = re.sub(r"hadou?ken", "fireball", option_name_lower)
+                if (
+                    reply_compact == compact_token(option_name)
+                    or reply_compact == compact_token(option_name_fireball_alias)
+                    or reply_compact == compact_token(option_cmd)
+                ):
+                    exact_option_matches.append((option_name, option_cmd))
+            if len(exact_option_matches) == 1:
+                selected_option_name, selected_option_cmd = exact_option_matches[0]
+            elif not exact_option_matches and raw_special_reply_lower in strength_aliases:
+                alias_tokens = strength_aliases[raw_special_reply_lower]
+                for option_name, option_cmd in option_matches:
+                    option_name_tokens = set(re.findall(r"[a-z0-9]+", option_name.lower()))
+                    option_cmd_tokens = set(re.findall(r"[a-z0-9]+", option_cmd.lower()))
+                    if alias_tokens & option_name_tokens or alias_tokens & option_cmd_tokens:
+                        selected_option_name = option_name
+                        selected_option_cmd = option_cmd
+                        break
+
+            if not selected_option_name and not selected_option_cmd:
+                reply_tokens = set(re.findall(r"[a-z0-9]+", raw_special_reply_lower))
+                scored_matches = []
+                for option_name, option_cmd in option_matches:
+                    option_name_tokens = set(re.findall(r"[a-z0-9]+", option_name.lower()))
+                    overlap = len(reply_tokens & option_name_tokens)
+                    if overlap > 0:
+                        scored_matches.append((overlap, option_name, option_cmd))
+                if scored_matches:
+                    scored_matches.sort(key=lambda item: item[0], reverse=True)
+                    top_score = scored_matches[0][0]
+                    top_matches = [item for item in scored_matches if item[0] == top_score]
+                    if len(top_matches) == 1:
+                        _, selected_option_name, selected_option_cmd = top_matches[0]
+
+        if selected_option_name or selected_option_cmd:
+            selected_value = selected_option_name or selected_option_cmd
+            if char_hint:
+                resolved_char = normalize_char_name(char_hint)
+                direct_row = lookup_frame_data(resolved_char, selected_value)
+                if direct_row:
+                    await send_frame_table_response(message, [direct_row], format_frame_data(direct_row))
+                    return
+            special_query = f"{char_hint} {selected_value} framedata".strip()
+            special_query_lower = special_query.lower()
+
         if char_hint:
             normalized_hint = normalize_char_name(char_hint)
             if normalized_hint not in special_query_lower:
                 special_query = f"{char_hint} {special_query}".strip()
                 special_query_lower = special_query.lower()
 
-        if base_hint and base_hint not in special_query_lower:
+        if base_hint and base_hint not in special_query_lower and not selected_option_cmd:
             if re.fullmatch(r"(lp|mp|hp|lk|mk|hk|od|ex|light|medium|heavy|l|m|h)", raw_special_reply_lower):
                 special_query = f"{special_query} {base_hint}".strip()
             elif not re.search(r"\b(lp|mp|hp|lk|mk|hk|od|ex|light|medium|heavy|l|m|h)\b", special_query_lower):
@@ -3938,6 +4925,8 @@ async def on_message(message):
         if special_payload.get("mode") == "frame" and special_rows and special_data:
             await send_frame_table_response(message, special_rows, special_data)
             return
+        await message.reply(replied_context)
+        return
 
 
 
@@ -3978,17 +4967,6 @@ async def on_message(message):
             return
         if has_prompt_or_media and LLM_ENABLED:
              try:
-                # fetch context
-                context_history = []
-                async for prev_msg in message.channel.history(limit=5, before=message):
-                    # store reversed
-                    msg_text = f"{prev_msg.author.display_name}: {strip_discord_mentions(prev_msg.content)}"
-                    context_history.append(msg_text)
-                
-                # oldest -> newest
-                context_history.reverse()
-                context_str = "\n".join(context_history)
-                
                 # build msg list
                 selected_figures_str = get_selected_figures_str(message.guild)
                 
@@ -4001,7 +4979,20 @@ async def on_message(message):
                     )
                 else:
                     active_prompt = SYSTEM_PROMPT.format(selected_figures_str=selected_figures_str)
-                
+
+                history_char_budget = estimate_llm_context_history_char_budget(
+                    active_prompt,
+                    prompt,
+                    replied_context,
+                    media_context,
+                    MOVE_DEFINITIONS,
+                )
+                context_history = await build_llm_context_history(
+                    message,
+                    char_budget=history_char_budget,
+                )
+                context_str = "\n".join(context_history)
+                 
                 llm_messages = [
                     {"role": "system", "content": active_prompt}
                 ]
