@@ -1137,6 +1137,7 @@ def find_moves_in_text(text):
     found_data = []
     text_lower = strip_discord_mentions(text).lower()
     text_lower = normalize_jump_normal_text(text_lower)
+    text_lower = re.sub(r"\bdivekick\b", "dive kick", text_lower)
     tc_prompt_blocks = []
     special_prompt_blocks = []
     tc_ambiguous_inputs = set()
@@ -1318,9 +1319,30 @@ def find_moves_in_text(text):
                 or "(charged)" in num_cmd
             )
 
+        def row_is_od_variant(row):
+            move_name = str(row.get("moveName", "")).lower().strip()
+            cmn_name = str(row.get("cmnName", "")).lower().strip()
+            num_cmd_compact = re.sub(r"[^a-z0-9]", "", str(row.get("numCmd", "")).lower())
+            return (
+                move_name.startswith(("od ", "ex "))
+                or cmn_name.startswith(("od ", "ex "))
+                or num_cmd_compact.endswith(("pp", "kk"))
+            )
+
     
         move_regex = r"\b([1-9][0-9]*[a-zA-Z]+|stand\s+[a-zA-Z]+|crouch\s+[a-zA-Z]+|(?:neutral\s+|n\s+)?jump\s+[a-zA-Z]+|(?:neutral\s+|n\s+)?jump\s+[1-9][0-9]*[a-zA-Z]+|(?:neutral\s+|n\s+)?j(?:\s+|\.)[a-zA-Z]+|(?:neutral\s+|n\s+)?j(?:\s+|\.)[1-9][0-9]*[a-zA-Z]+|(?:neutral\s+|n\s+)?j\.?[1-9][0-9]*[a-zA-Z]+|(?:lp|mp|hp|lk|mk|hk|light|medium|heavy|l|m|h)\s+[a-zA-Z]+(?:\s+[a-zA-Z]+)?|[a-zA-Z]+\s+kick|[a-zA-Z]+\s+punch)\b"
         potential_inputs = re.findall(move_regex, text_lower)
+        compact_motion_inputs = []
+        motion_button_matches = re.findall(
+            r"\b([1-9][0-9]{1,4})\s*(?:\+)?\s*(lp|mp|hp|lk|mk|hk|pp|kk|p|k)\b",
+            text_lower,
+        )
+        for motion_digits, button_suffix in motion_button_matches:
+            compact_motion = f"{motion_digits}{button_suffix}"
+            if compact_motion not in compact_motion_inputs:
+                compact_motion_inputs.append(compact_motion)
+        if compact_motion_inputs:
+            potential_inputs = compact_motion_inputs + potential_inputs
         strength_prefix_pattern = re.compile(r"^(lp|mp|hp|lk|mk|hk|light|medium|heavy|l|m|h)\b")
         strength_prefixes_for_filter = [
             "lp", "mp", "hp", "lk", "mk", "hk",
@@ -1330,10 +1352,16 @@ def find_moves_in_text(text):
         for inp in potential_inputs:
             if not inp:
                 continue
+            original_inp = str(inp).strip().lower()
             cleaned_inp = re.sub(r"\s+framedata$", "", inp).strip()
             cleaned_inp = re.sub(r"\s+frame\s*data$", "", cleaned_inp).strip()
             cleaned_inp = re.sub(r"\s+frame$", "", cleaned_inp).strip()
             if not cleaned_inp:
+                continue
+            if cleaned_inp in strength_prefixes_for_filter and re.search(
+                r"\b(frame\s*data|framedata|frame|data|gif|gifs|hitbox|hitboxes|startup|recovery|active|stats|punish|punishable)\b",
+                original_inp,
+            ):
                 continue
             if not strength_prefix_pattern.match(cleaned_inp):
                 if any(
@@ -1353,6 +1381,51 @@ def find_moves_in_text(text):
             "od", "ex",
         }
         query_has_explicit_strength = any(token in query_strength_tokens for token in text_tokens)
+        air_tatsu_context = bool(
+            re.search(
+                r"\b(?:air|aerial)\s+tatsu\b|\b(?:air|aerial)\s+tatsumaki\b|\btatsu\s*\(air\)\b|\bj\.?\s*214k\b",
+                text_lower,
+            )
+        )
+        ken_run_followup_context = bool(
+            "ken" in mentioned_chars
+            and re.search(r"\brun\s+(?:dp|shoryu|shoryuken|tatsu|dragonlash|dragon\s+lash|lash)\b", text_lower)
+        )
+
+        if "ken" in mentioned_chars:
+            ken_run_alias_tokens = [
+                (r"\brun\s+stop\b", "emergency stop"),
+                (r"\brun\s+overhead\b", "thunder kick"),
+                (r"\brun\s+step\s*kick\b", "forward step kick"),
+                (r"\brun\s+step\b", "forward step kick"),
+                (r"\brun\s+(?:dp|shoryu|shoryuken)\b", "run > shoryuken"),
+                (r"\brun\s+tatsu\b", "run > tatsumaki senpukyaku"),
+                (r"\brun\s+(?:dragonlash|dragon\s+lash|lash)\b", "run > dragonlash"),
+            ]
+            for pattern, alias_token in ken_run_alias_tokens:
+                if re.search(pattern, text_lower) and alias_token not in extra_inputs:
+                    extra_inputs.append(alias_token)
+            if not ken_run_followup_context:
+                ken_lash_alias_tokens = [
+                    (r"\b(?:od|ex)\s+(?:dragonlash|dragon\s+lash|lash)\b", "od lash"),
+                    (r"\b(?:l|light|lk)\s+(?:dragonlash|dragon\s+lash|lash)\b", "l lash"),
+                    (r"\b(?:m|medium|mk)\s+(?:dragonlash|dragon\s+lash|lash)\b", "m lash"),
+                    (r"\b(?:h|heavy|hk)\s+(?:dragonlash|dragon\s+lash|lash)\b", "h lash"),
+                    (r"\b(?:dragonlash|dragon\s+lash|lash)\b", "lash"),
+                ]
+                selected_lash_alias = None
+                for pattern, alias_token in ken_lash_alias_tokens:
+                    if re.search(pattern, text_lower):
+                        selected_lash_alias = alias_token
+                        break
+                if selected_lash_alias and selected_lash_alias not in extra_inputs:
+                    extra_inputs.append(selected_lash_alias)
+            if re.search(r"\brun\b", text_lower) and not re.search(
+                r"\brun\s+(?:stop|overhead|step|dp|shoryu|shoryuken|tatsu|dragonlash|dragon\s+lash|lash)\b",
+                text_lower,
+            ):
+                if "quick dash" not in extra_inputs:
+                    extra_inputs.append("quick dash")
 
         def is_special_motion_num_cmd(num_cmd_raw):
             compact = re.sub(r"[^a-z0-9]", "", str(num_cmd_raw).lower())
@@ -1415,6 +1488,8 @@ def find_moves_in_text(text):
                     base_in_query = tokens_in_text(base_tokens)
                     if not base_in_query and base_name == "fireball":
                         base_in_query = "hadoken" in text_tokens or "hadouken" in text_tokens
+                    if not base_in_query and base_name == "upkicks":
+                        base_in_query = "tensho" in text_tokens or "tenshokyaku" in text_tokens
                     if not base_in_query and base_name == "palm thrust":
                         base_in_query = "hashogeki" in text_tokens
                     if not base_in_query and base_name == "super art level 1":
@@ -1426,6 +1501,18 @@ def find_moves_in_text(text):
                     if not base_in_query and base_name == "spd":
                         base_in_query = "command" in text_tokens and "grab" in text_tokens
                     if not base_in_query:
+                        continue
+                    if (
+                        air_tatsu_context
+                        and char in {"ryu", "ken", "akuma"}
+                        and base_name in {"tatsu", "air tatsu"}
+                    ):
+                        continue
+                    if (
+                        ken_run_followup_context
+                        and char == "ken"
+                        and base_name in {"dp", "tatsu", "dragonlash"}
+                    ):
                         continue
                     prompt_key = (char, base_name)
                     if prompt_key in seen_special_prompts:
@@ -1477,6 +1564,11 @@ def find_moves_in_text(text):
         if re.search(r"\b(ex|od)(dp|srk|shoryu|shoryuken)\b", text_lower):
             extra_inputs.append("623pp")
             extra_inputs.append("623kk")
+        if ken_run_followup_context:
+            extra_inputs = [
+                token for token in extra_inputs
+                if token not in {"dp", "srk", "shoryu", "shoryuken", "tatsu", "dragonlash"}
+            ]
         if "sway" in text_lower:
             extra_inputs.append("sway")
         if "jus cool" in text_lower or "juscool" in text_lower:
@@ -1650,11 +1742,31 @@ def find_moves_in_text(text):
             "upkicks",
             "upkick",
             "up kicks",
+            "tensho",
+            "tenshokyaku",
+            "tensho kick",
+            "tensho kicks",
+            "dive kick",
+            "divekick",
+            "air tatsu",
+            "aerial tatsu",
+            "air tatsumaki",
+            "aerial tatsumaki",
+            "air legs",
+            "airlegs",
+            "aerial legs",
+            "air lightning legs",
             "sumo smash",
             "ass slam",
             "butt slam",
             "spinning bird kick",
             "sbk",
+            # JP 22 specials
+            "triglav",
+            "amnesia",
+            "ground spike",
+            "spike",
+            "pierce",
         ]
         # Strength prefixes for charge moves
         strength_prefixes = ["lp", "mp", "hp", "od", "ex", "light", "medium", "heavy", "l", "m", "h"]
@@ -1721,6 +1833,13 @@ def find_moves_in_text(text):
                 return True
             return False
 
+        motion_button_notation_present = bool(
+            re.search(
+                r"\b[1-9][0-9]*\s*(?:\+)?\s*(?:lp|mp|hp|lk|mk|hk|pp|kk|p|k)\b",
+                text_lower,
+            )
+        )
+
         for char in mentioned_chars:
             char_data = FRAME_DATA[char]
             for row in char_data:
@@ -1736,6 +1855,18 @@ def find_moves_in_text(text):
                         and not query_has_explicit_strength
                     ):
                         candidate_names.append(stripped_name)
+                    if char == "sagat":
+                        tigerless_candidates = []
+                        for name_variant in list(candidate_names):
+                            tigerless_variant = re.sub(r"\btiger\b", "", name_variant)
+                            tigerless_variant = re.sub(r"\s+", " ", tigerless_variant).strip()
+                            if (
+                                tigerless_variant
+                                and tigerless_variant != name_variant
+                                and tigerless_variant not in candidate_names
+                            ):
+                                tigerless_candidates.append(tigerless_variant)
+                        candidate_names.extend(tigerless_candidates)
                     for candidate_name in candidate_names:
                         candidate_has_strength_prefix = bool(strength_prefix_re.match(candidate_name))
                         if query_has_explicit_strength and not candidate_has_strength_prefix:
@@ -1744,6 +1875,26 @@ def find_moves_in_text(text):
                         if not candidate_tokens:
                             continue
                         if len(candidate_tokens) < 2:
+                            if (
+                                char == "sagat"
+                                and len(candidate_tokens) == 1
+                                and len(candidate_tokens[0]) >= 4
+                                and candidate_tokens[0] in text_tokens
+                            ):
+                                if candidate_name not in potential_inputs:
+                                    potential_inputs.append(candidate_name)
+                            if (
+                                char == "ken"
+                                and len(candidate_tokens) == 1
+                                and candidate_tokens[0] == "run"
+                                and "run" in text_tokens
+                                and not re.search(
+                                    r"\brun\s+(?:stop|overhead|step|dp|shoryu|shoryuken|tatsu|dragonlash|dragon\s+lash|lash)\b",
+                                    text_lower,
+                                )
+                            ):
+                                if candidate_name not in potential_inputs:
+                                    potential_inputs.append(candidate_name)
                             continue
                         candidate_compact = re.sub(r"[^a-z0-9]", "", candidate_name)
                         if (
@@ -1784,7 +1935,7 @@ def find_moves_in_text(text):
                     )
                 )
 
-            if not special_grab_query:
+            if not special_grab_query and not motion_button_notation_present:
                 if f"{char} mp" in text_lower and not is_button_part_of_dp_motion("mp"):
                     row = lookup_frame_data(char, "mp")
                     if row and row not in results:
@@ -1893,6 +2044,42 @@ def find_moves_in_text(text):
         if query_requires_denjin and results:
             denjin_results = [row for row in results if row_is_denjin_variant(row)]
             results = denjin_results
+
+        if query_has_explicit_strength and results:
+            wants_od_strength = bool(re.search(r"\b(od|ex)\b", text_lower))
+            wants_non_od_strength = bool(
+                re.search(r"\b(lp|mp|hp|lk|mk|hk|light|medium|heavy|l|m|h)\b", text_lower)
+            )
+            if wants_od_strength:
+                od_results = [row for row in results if row_is_od_variant(row)]
+                if od_results:
+                    results = od_results
+            elif wants_non_od_strength:
+                non_od_results = [row for row in results if not row_is_od_variant(row)]
+                if non_od_results:
+                    results = non_od_results
+
+        if air_tatsu_context and results:
+            air_tatsu_chars = {"ryu", "ken", "akuma"}
+            mentioned_air_tatsu_chars = set(mentioned_chars) & air_tatsu_chars
+            if mentioned_air_tatsu_chars:
+                filtered_results = []
+                for row in results:
+                    row_char_key = normalize_char_name(row.get("char_name", ""))
+                    row_char_matches = any(
+                        normalize_char_name(char) == row_char_key
+                        for char in mentioned_air_tatsu_chars
+                    )
+                    if not row_char_matches:
+                        filtered_results.append(row)
+                        continue
+                    move_name = str(row.get("moveName", "")).lower()
+                    cmn_name = str(row.get("cmnName", "")).lower()
+                    num_cmd = str(row.get("numCmd", "")).lower()
+                    if "air" in move_name or "air" in cmn_name or "(air)" in num_cmd:
+                        filtered_results.append(row)
+                if filtered_results:
+                    results = filtered_results
 
     if special_prompt_blocks and (not query_has_explicit_strength or (special_grab_query and not results)):
         results = []
@@ -2148,7 +2335,17 @@ def lookup_frame_data(character, move_input):
             neutral_tokens = neutral_query.split()
 
     move_input = re.sub(r"^ex\s+", "od ", move_input)
-    move_input = re.sub(r"^(jump|j)[\s\.]+", "8", move_input)
+    move_input = re.sub(r"\bdivekick\b", "dive kick", move_input)
+    if not re.match(
+        r"^(jump|j)[\s\.]+(?:214|236|623|421|22|46|28|41236|63214)",
+        move_input,
+    ):
+        move_input = re.sub(r"^(jump|j)[\s\.]+", "8", move_input)
+    move_input = re.sub(
+        r"^([1-9][0-9]*)\s*(?:\+)?\s*(lp|mp|hp|lk|mk|hk|pp|kk|p|k)$",
+        r"\1\2",
+        move_input,
+    )
 
     def get_motion_suffixes(motion_digits):
         suffixes = set()
@@ -2362,6 +2559,11 @@ def lookup_frame_data(character, move_input):
             return row
         if neutral_candidate:
             return neutral_candidate
+
+    def normalize_num_cmd_for_lookup(value):
+        normalized = re.sub(r"\([^)]*\)", "", str(value or "").lower())
+        normalized = re.sub(r"\s+", "", normalized)
+        return re.sub(r"[^a-z0-9>]", "", normalized)
     
     INPUT_ALIASES = {
         # Chun-Li
@@ -2480,6 +2682,164 @@ def lookup_frame_data(character, move_input):
             "light upkicks": "lk jackknife maximum",
             "medium upkicks": "mk jackknife maximum",
             "heavy upkicks": "hk jackknife maximum",
+        },
+        "jamie": {
+            "dive kick": "l luminous dive kick",
+            "divekick": "l luminous dive kick",
+            "l dive kick": "l luminous dive kick",
+            "m dive kick": "m luminous dive kick",
+            "h dive kick": "h luminous dive kick",
+            "light dive kick": "l luminous dive kick",
+            "medium dive kick": "m luminous dive kick",
+            "heavy dive kick": "h luminous dive kick",
+            "od dive kick": "od luminous dive kick",
+            "ex dive kick": "od luminous dive kick",
+            "l divekick": "l luminous dive kick",
+            "m divekick": "m luminous dive kick",
+            "h divekick": "h luminous dive kick",
+            "light divekick": "l luminous dive kick",
+            "medium divekick": "m luminous dive kick",
+            "heavy divekick": "h luminous dive kick",
+            "od divekick": "od luminous dive kick",
+            "ex divekick": "od luminous dive kick",
+        },
+        "ryu": {
+            "air tatsu": "air tatsumaki senpukyaku",
+            "aerial tatsu": "air tatsumaki senpukyaku",
+            "air tatsumaki": "air tatsumaki senpukyaku",
+            "aerial tatsumaki": "air tatsumaki senpukyaku",
+            "l air tatsu": "air tatsumaki senpukyaku",
+            "m air tatsu": "air tatsumaki senpukyaku",
+            "h air tatsu": "air tatsumaki senpukyaku",
+            "light air tatsu": "air tatsumaki senpukyaku",
+            "medium air tatsu": "air tatsumaki senpukyaku",
+            "heavy air tatsu": "air tatsumaki senpukyaku",
+            "od air tatsu": "od air tatsumaki senpukyaku",
+            "ex air tatsu": "od air tatsumaki senpukyaku",
+            "214k air": "air tatsumaki senpukyaku",
+            "214kk air": "od air tatsumaki senpukyaku",
+            "j214k": "air tatsumaki senpukyaku",
+            "j.214k": "air tatsumaki senpukyaku",
+            "j 214k": "air tatsumaki senpukyaku",
+            "j214kk": "od air tatsumaki senpukyaku",
+            "j.214kk": "od air tatsumaki senpukyaku",
+            "j 214kk": "od air tatsumaki senpukyaku",
+        },
+        "ken": {
+            "run": "quick dash",
+            "quick run": "quick dash",
+            "dash run": "quick dash",
+            "5kk": "quick dash",
+            "air tatsu": "air tatsumaki senpukyaku",
+            "aerial tatsu": "air tatsumaki senpukyaku",
+            "air tatsumaki": "air tatsumaki senpukyaku",
+            "aerial tatsumaki": "air tatsumaki senpukyaku",
+            "l air tatsu": "air tatsumaki senpukyaku",
+            "m air tatsu": "air tatsumaki senpukyaku",
+            "h air tatsu": "air tatsumaki senpukyaku",
+            "light air tatsu": "air tatsumaki senpukyaku",
+            "medium air tatsu": "air tatsumaki senpukyaku",
+            "heavy air tatsu": "air tatsumaki senpukyaku",
+            "od air tatsu": "od air tatsumaki senpukyaku",
+            "ex air tatsu": "od air tatsumaki senpukyaku",
+            "214k air": "air tatsumaki senpukyaku",
+            "214kk air": "od air tatsumaki senpukyaku",
+            "j214k": "air tatsumaki senpukyaku",
+            "j.214k": "air tatsumaki senpukyaku",
+            "j 214k": "air tatsumaki senpukyaku",
+            "j214kk": "od air tatsumaki senpukyaku",
+            "j.214kk": "od air tatsumaki senpukyaku",
+            "j 214kk": "od air tatsumaki senpukyaku",
+            "lash": "dragonlash kick",
+            "dragonlash": "dragonlash kick",
+            "dragon lash": "dragonlash kick",
+            "od dragonlash": "od dragonlash kick",
+            "ex dragonlash": "od dragonlash kick",
+            "od dragon lash": "od dragonlash kick",
+            "ex dragon lash": "od dragonlash kick",
+            "l lash": "lk dragonlash kick",
+            "m lash": "mk dragonlash kick",
+            "h lash": "hk dragonlash kick",
+            "light lash": "lk dragonlash kick",
+            "medium lash": "mk dragonlash kick",
+            "heavy lash": "hk dragonlash kick",
+            "od lash": "od dragonlash kick",
+            "ex lash": "od dragonlash kick",
+            "run stop": "emergency stop",
+            "run overhead": "thunder kick",
+            "run step": "forward step kick",
+            "run step kick": "forward step kick",
+            "run dp": "run > shoryuken",
+            "run shoryu": "run > shoryuken",
+            "run shoryuken": "run > shoryuken",
+            "run tatsu": "run > tatsumaki senpukyaku",
+            "run dragonlash": "run > dragonlash",
+            "run dragon lash": "run > dragonlash",
+            "run lash": "run > dragonlash",
+        },
+        "juri": {
+            "dive kick": "shiku-sen",
+            "divekick": "shiku-sen",
+            "l dive kick": "shiku-sen",
+            "m dive kick": "shiku-sen",
+            "h dive kick": "shiku-sen",
+            "light dive kick": "shiku-sen",
+            "medium dive kick": "shiku-sen",
+            "heavy dive kick": "shiku-sen",
+            "od dive kick": "od shiku-sen",
+            "ex dive kick": "od shiku-sen",
+            "l divekick": "shiku-sen",
+            "m divekick": "shiku-sen",
+            "h divekick": "shiku-sen",
+            "light divekick": "shiku-sen",
+            "medium divekick": "shiku-sen",
+            "heavy divekick": "shiku-sen",
+            "od divekick": "od shiku-sen",
+            "ex divekick": "od shiku-sen",
+            "j214k": "shiku-sen",
+            "j.214k": "shiku-sen",
+            "j 214k": "shiku-sen",
+            "j214kk": "od shiku-sen",
+            "j.214kk": "od shiku-sen",
+            "j 214kk": "od shiku-sen",
+            "214k air": "shiku-sen",
+            "214kk air": "od shiku-sen",
+        },
+        "akuma": {
+            "dive kick": "tenmaku blade kick",
+            "divekick": "tenmaku blade kick",
+            "l dive kick": "tenmaku blade kick",
+            "m dive kick": "tenmaku blade kick",
+            "h dive kick": "tenmaku blade kick",
+            "light dive kick": "tenmaku blade kick",
+            "medium dive kick": "tenmaku blade kick",
+            "heavy dive kick": "tenmaku blade kick",
+            "l divekick": "tenmaku blade kick",
+            "m divekick": "tenmaku blade kick",
+            "h divekick": "tenmaku blade kick",
+            "light divekick": "tenmaku blade kick",
+            "medium divekick": "tenmaku blade kick",
+            "heavy divekick": "tenmaku blade kick",
+            "air tatsu": "aerial tatsumaki zanku-kyaku",
+            "aerial tatsu": "aerial tatsumaki zanku-kyaku",
+            "air tatsumaki": "aerial tatsumaki zanku-kyaku",
+            "aerial tatsumaki": "aerial tatsumaki zanku-kyaku",
+            "l air tatsu": "aerial tatsumaki zanku-kyaku",
+            "m air tatsu": "aerial tatsumaki zanku-kyaku",
+            "h air tatsu": "aerial tatsumaki zanku-kyaku",
+            "light air tatsu": "aerial tatsumaki zanku-kyaku",
+            "medium air tatsu": "aerial tatsumaki zanku-kyaku",
+            "heavy air tatsu": "aerial tatsumaki zanku-kyaku",
+            "od air tatsu": "od aerial tatsumaki zanku-kyaku",
+            "ex air tatsu": "od aerial tatsumaki zanku-kyaku",
+            "214k air": "aerial tatsumaki zanku-kyaku",
+            "214kk air": "od aerial tatsumaki zanku-kyaku",
+            "j214k": "aerial tatsumaki zanku-kyaku",
+            "j.214k": "aerial tatsumaki zanku-kyaku",
+            "j 214k": "aerial tatsumaki zanku-kyaku",
+            "j214kk": "od aerial tatsumaki zanku-kyaku",
+            "j.214kk": "od aerial tatsumaki zanku-kyaku",
+            "j 214kk": "od aerial tatsumaki zanku-kyaku",
         },
         "guile": {
             "46p": "sonic boom",
@@ -2662,6 +3022,48 @@ def lookup_frame_data(character, move_input):
             "light sbk": "lk spinning bird kick",
             "medium sbk": "mk spinning bird kick",
             "heavy sbk": "hk spinning bird kick",
+            # 22K Tenshokyaku (upkicks)
+            "tensho": "upkicks",
+            "tensho kick": "upkicks",
+            "tensho kicks": "upkicks",
+            "tenshokyaku": "upkicks",
+            "lk tensho": "lk tenshokyaku",
+            "mk tensho": "mk tenshokyaku",
+            "hk tensho": "hk tenshokyaku",
+            "l tensho": "lk tenshokyaku",
+            "m tensho": "mk tenshokyaku",
+            "h tensho": "hk tenshokyaku",
+            "light tensho": "lk tenshokyaku",
+            "medium tensho": "mk tenshokyaku",
+            "heavy tensho": "hk tenshokyaku",
+            "od tensho": "od tenshokyaku",
+            "ex tensho": "od tenshokyaku",
+            # 236K (Air) Air Legs
+            "air legs": "236k (air)",
+            "airlegs": "236k (air)",
+            "aerial legs": "236k (air)",
+            "air lightning legs": "236k (air)",
+            "air hyakuretsukyaku": "236k (air)",
+            "hyakuretsukyaku air": "236k (air)",
+            "236k air": "236k (air)",
+            "236k(air)": "236k (air)",
+            "236 k air": "236k (air)",
+            "l air legs": "236lk (air)",
+            "m air legs": "236mk (air)",
+            "h air legs": "236hk (air)",
+            "light air legs": "236lk (air)",
+            "medium air legs": "236mk (air)",
+            "heavy air legs": "236hk (air)",
+            "od air legs": "236kk (air)",
+            "ex air legs": "236kk (air)",
+            "236lk air": "236lk (air)",
+            "236 lk air": "236lk (air)",
+            "236mk air": "236mk (air)",
+            "236 mk air": "236mk (air)",
+            "236hk air": "236hk (air)",
+            "236 hk air": "236hk (air)",
+            "236kk air": "236kk (air)",
+            "236 kk air": "236kk (air)",
         },
         "cammy": {
             # Hooligan > Throw (command grab)
@@ -2690,6 +3092,46 @@ def lookup_frame_data(character, move_input):
             "neutral jump heavy punch": "flying headbutt",
             "flying headbutt": "flying headbutt",
             "air headbutt": "flying headbutt",
+        },
+        "jp": {
+            "22p": "triglav",
+            "22 p": "triglav",
+            "22lp": "triglav",
+            "22 lp": "triglav",
+            "22mp": "triglav",
+            "22 mp": "triglav",
+            "22hp": "triglav",
+            "22 hp": "triglav",
+            "22pp": "od triglav",
+            "22 pp": "od triglav",
+            "22k": "amnesia",
+            "22 k": "amnesia",
+            "22kk": "od amnesia",
+            "22 kk": "od amnesia",
+            "ground spike": "triglav",
+            "od ground spike": "od triglav",
+            "spike": "triglav",
+            "od spike": "od triglav",
+            "l spike": "triglav",
+            "m spike": "triglav",
+            "h spike": "triglav",
+            "light spike": "triglav",
+            "medium spike": "triglav",
+            "heavy spike": "triglav",
+            "pierce": "triglav",
+            "od pierce": "od triglav",
+            "l pierce": "triglav",
+            "m pierce": "triglav",
+            "h pierce": "triglav",
+            "light pierce": "triglav",
+            "medium pierce": "triglav",
+            "heavy pierce": "triglav",
+            "counter": "amnesia",
+            "od counter": "od amnesia",
+            "amnesia bomb": "amnesia: bomb",
+            "od amnesia bomb": "od amnesia: bomb",
+            "22k bomb": "amnesia: bomb",
+            "22kk bomb": "od amnesia: bomb",
         },
     }
 
@@ -2772,15 +3214,26 @@ def lookup_frame_data(character, move_input):
     if move_input in char_aliases:
         move_input = char_aliases[move_input]
     move_input_compact = re.sub(r"[^a-z0-9]", "", move_input)
+    move_input_num_cmd = normalize_num_cmd_for_lookup(move_input)
+    move_input_tigerless = move_input
+    move_input_tigerless_compact = move_input_compact
+    if char_key == "sagat":
+        move_input_tigerless = re.sub(r"\btiger\b", "", move_input)
+        move_input_tigerless = re.sub(r"\s+", " ", move_input_tigerless).strip()
+        move_input_tigerless_compact = re.sub(r"[^a-z0-9]", "", move_input_tigerless)
     
     # search priority: numCmd -> plnCmd -> moveName
     for row in data:
         num_cmd = str(row.get('numCmd', '')).lower()
+        num_cmd_normalized = normalize_num_cmd_for_lookup(num_cmd)
         if combo_input and ">" in num_cmd:
             if re.sub(r"\s+", "", num_cmd) == combo_input:
                 return row
         # exact match numCmd (5MP)
         if num_cmd == move_input:
+            return row
+        # normalized numCmd match (handles annotations like 22P (refill))
+        if move_input_num_cmd and num_cmd_normalized == move_input_num_cmd:
             return row
         # prefix match for motion inputs (e.g., 623 -> 623LP)
         if move_input.isdigit() and len(move_input) == 3:
@@ -2790,7 +3243,7 @@ def lookup_frame_data(character, move_input):
                     move_name = str(row.get("moveName", "")).lower()
                     if any(term in move_name for term in exception_terms):
                         continue
-            if num_cmd.startswith(move_input):
+            if num_cmd.startswith(move_input) or num_cmd_normalized.startswith(move_input):
                 return row
         # exact match plnCmd (MP)
         if str(row.get('plnCmd', '')).lower() == move_input:
@@ -2801,8 +3254,26 @@ def lookup_frame_data(character, move_input):
             return row
         # fuzzy match moveName ("Stand MP")
         move_name = str(row.get('moveName', '')).lower()
+        cmn_name_tigerless = cmn_name
+        move_name_tigerless = move_name
         if len(move_input_compact) >= 3 and move_input in move_name:
             return row
+        if char_key == "sagat" and move_input_tigerless:
+            cmn_name_tigerless = re.sub(r"\btiger\b", "", cmn_name)
+            cmn_name_tigerless = re.sub(r"\s+", " ", cmn_name_tigerless).strip()
+            move_name_tigerless = re.sub(r"\btiger\b", "", move_name)
+            move_name_tigerless = re.sub(r"\s+", " ", move_name_tigerless).strip()
+            if cmn_name_tigerless == move_input_tigerless or (
+                len(move_input_tigerless_compact) >= 3
+                and cmn_name_tigerless
+                and move_input_tigerless in cmn_name_tigerless
+            ):
+                return row
+            if (
+                len(move_input_tigerless_compact) >= 3
+                and move_input_tigerless in move_name_tigerless
+            ):
+                return row
         if len(move_input_compact) >= 6:
             cmn_compact = re.sub(r"[^a-z0-9]", "", cmn_name)
             move_name_compact = re.sub(r"[^a-z0-9]", "", move_name)
@@ -2811,6 +3282,14 @@ def lookup_frame_data(character, move_input):
                 or move_input_compact in move_name_compact
             ):
                 return row
+            if char_key == "sagat" and len(move_input_tigerless_compact) >= 6:
+                cmn_tigerless_compact = re.sub(r"[^a-z0-9]", "", cmn_name_tigerless)
+                move_tigerless_compact = re.sub(r"[^a-z0-9]", "", move_name_tigerless)
+                if (
+                    (cmn_tigerless_compact and move_input_tigerless_compact in cmn_tigerless_compact)
+                    or move_input_tigerless_compact in move_tigerless_compact
+                ):
+                    return row
             
     return None
 
@@ -2833,6 +3312,7 @@ def extract_button_suffix(num_cmd_token):
 
 def normalize_move_name_for_gif_text(value):
     text = str(value or "").lower()
+    text = re.sub(r"\bdivekick\b", "dive kick", text)
     text = re.sub(r"\b6\s*h\s*p\s*\+\s*h\s*k\b", "drive reversal", text)
     text = re.sub(r"\b6hphk\b", "drive reversal", text)
     text = re.sub(r"\b5\s*h\s*p\s*\+\s*h\s*k\b", "drive impact", text)
@@ -4886,13 +5366,16 @@ async def on_message(message):
                         _, selected_option_name, selected_option_cmd = top_matches[0]
 
         if selected_option_name or selected_option_cmd:
-            selected_value = selected_option_name or selected_option_cmd
+            selected_value = selected_option_cmd or selected_option_name
             if char_hint:
-                resolved_char = normalize_char_name(char_hint)
-                direct_row = lookup_frame_data(resolved_char, selected_value)
-                if direct_row:
-                    await send_frame_table_response(message, [direct_row], format_frame_data(direct_row))
-                    return
+                resolved_char = resolve_character_key(char_hint) or normalize_char_name(char_hint)
+                for direct_value in (selected_option_cmd, selected_option_name):
+                    if not direct_value:
+                        continue
+                    direct_row = lookup_frame_data(resolved_char, direct_value)
+                    if direct_row:
+                        await send_frame_table_response(message, [direct_row], format_frame_data(direct_row))
+                        return
             special_query = f"{char_hint} {selected_value} framedata".strip()
             special_query_lower = special_query.lower()
 
