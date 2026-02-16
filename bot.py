@@ -87,6 +87,16 @@ DELETED_MESSAGE_FAILSAFE_PROMPT = (
     "Tone: smug, playful, in-character."
 )
 DELETED_MESSAGE_FAILSAFE_FALLBACK = "you can never escape me with your puny attempts."
+RANGE_SCROLLS_MISSING_TEXT = "the range of that move is not on the supercombo scrolls"
+RANGE_MISSING_PLACEHOLDERS = {"{{{atkrange}}}"}
+
+
+def is_missing_attack_range_value(raw_value):
+    text = str(raw_value or "").strip()
+    if not text:
+        return True
+    normalized = re.sub(r"\s+", "", text).lower()
+    return normalized in RANGE_MISSING_PLACEHOLDERS
 
 REMINDER_POLL_SECONDS = int(os.getenv('REMINDER_POLL_SECONDS', '10'))
 REMINDER_PENDING_TTL_SECONDS = int(os.getenv('REMINDER_PENDING_TTL_SECONDS', '600'))
@@ -159,6 +169,7 @@ intents.members = True
 client = discord.Client(intents=intents)
 
 NEXT_RUN_TIME = None
+NEXT_ENCOURAGEMENT_TIME = None
 NEXT_VIDEO_TIME = None
 NEXT_DAMN_GG_TIME = None
 
@@ -932,6 +943,7 @@ BNB_DATA = {}
 OKI_DATA = {}
 CHARACTER_INFO = {}
 HITBOX_GIF_DATA = {}
+RANGE_DATA = {}
 
 CHARACTER_ALIASES = {
     "kim": "kimberly",
@@ -996,7 +1008,7 @@ def format_sheet_text(df: pd.DataFrame) -> str:
 
 def load_frame_data():
     """Load frame data, stats, combos, oki, and character info from ODS."""
-    global FRAME_DATA, FRAME_STATS, BNB_DATA, OKI_DATA, CHARACTER_INFO, HITBOX_GIF_DATA
+    global FRAME_DATA, FRAME_STATS, BNB_DATA, OKI_DATA, CHARACTER_INFO, HITBOX_GIF_DATA, RANGE_DATA
     filename = "FAT - SF6 Frame Data.ods"
     
     if os.path.exists(filename):
@@ -1040,6 +1052,7 @@ def load_frame_data():
             OKI_DATA = {}
             CHARACTER_INFO = {}
             HITBOX_GIF_DATA = {}
+            RANGE_DATA = {}
             normalized_chars = {
                 normalize_char_name(name): name
                 for name in FRAME_DATA.keys()
@@ -1050,6 +1063,83 @@ def load_frame_data():
                 if canonical in FRAME_DATA:
                     character_lookup[normalize_char_name(alias)] = canonical
                     character_lookup[normalize_char_name(canonical)] = canonical
+
+            def normalize_range_cmd_token(value):
+                text = str(value or "").lower()
+                text = text.replace("->", ">")
+                text = text.replace("~", ">")
+                text = text.replace("|", "/")
+                text = re.sub(r"\bor\b", "/", text)
+                text = re.sub(r"\([^)]*\)", "", text)
+                text = re.sub(r"\s+", "", text)
+                return re.sub(r"[^a-z0-9>/+]", "", text)
+
+            def build_range_cmd_tokens(value):
+                normalized = normalize_range_cmd_token(value)
+                if not normalized:
+                    return []
+                tokens = []
+                for part in normalized.split("/"):
+                    token = part.strip()
+                    if not token:
+                        continue
+                    if token not in tokens:
+                        tokens.append(token)
+                    if token.startswith("5") and len(token) > 1:
+                        token_without_five = token[1:]
+                        if token_without_five and token_without_five not in tokens:
+                            tokens.append(token_without_five)
+                return tokens
+
+            def choose_preferred_range(values):
+                cleaned_values = [str(value).strip() for value in values if str(value).strip()]
+                if not cleaned_values:
+                    return ""
+                for value in cleaned_values:
+                    if not is_missing_attack_range_value(value):
+                        return value
+                return ""
+
+            range_sheet_name = next(
+                (name for name in xls.sheet_names if name.lower() in {"range", "ranges"}),
+                None,
+            )
+            if range_sheet_name:
+                range_df = pd.read_excel(xls, sheet_name=range_sheet_name, dtype=str).fillna("")
+                for range_row in range_df.to_dict("records"):
+                    char_raw = str(range_row.get("chara", "")).strip()
+                    input_raw = str(range_row.get("input", "")).strip()
+                    atk_range_raw = str(range_row.get("atkRange", "")).strip()
+                    if not char_raw or not input_raw:
+                        continue
+                    char_key = character_lookup.get(normalize_char_name(char_raw))
+                    if not char_key:
+                        continue
+                    for token in build_range_cmd_tokens(input_raw):
+                        RANGE_DATA.setdefault(char_key, {}).setdefault(token, []).append(atk_range_raw)
+            else:
+                print("Range sheet not found: ranges")
+
+            for char_key, records in FRAME_DATA.items():
+                char_ranges = RANGE_DATA.get(char_key, {})
+                for row in records:
+                    row_tokens = []
+                    for token in build_range_cmd_tokens(row.get("numCmd", "")):
+                        if token not in row_tokens:
+                            row_tokens.append(token)
+                    for token in build_num_cmd_candidates_for_gif(row):
+                        for variant in build_range_cmd_tokens(token):
+                            if variant not in row_tokens:
+                                row_tokens.append(variant)
+
+                    selected_range = ""
+                    for token in row_tokens:
+                        if token not in char_ranges:
+                            continue
+                        selected_range = choose_preferred_range(char_ranges[token])
+                        if selected_range:
+                            break
+                    row["atkRange"] = selected_range
 
             gif_sheet_name = next(
                 (name for name in xls.sheet_names if name.lower() == "hitboxgiflinks"),
@@ -1125,7 +1215,9 @@ def load_frame_data():
             print(f"Total oki sheets loaded: {len(OKI_DATA)} characters")
             print(f"Total character info sheets loaded: {len(CHARACTER_INFO)} characters")
             total_hitbox_gifs = sum(len(entries) for entries in HITBOX_GIF_DATA.values())
+            total_ranges = sum(len(entries) for entries in RANGE_DATA.values())
             print(f"Total hitbox gif links loaded: {total_hitbox_gifs}")
+            print(f"Total range inputs loaded: {total_ranges}")
             
         except Exception as e:
             print(f"Error loading {filename}: {e}")
@@ -1168,6 +1260,13 @@ def find_moves_in_text(text):
         char_tokens = re.findall(r"[a-z0-9]+", char)
         if tokens_in_text(char_tokens) and char not in mentioned_chars:
             mentioned_chars.append(char)
+
+    if not mentioned_chars and (
+        re.search(r"\braging\s+demon\b", text_lower)
+        or re.search(r"\bshun\s+goku\s+satsu\b", text_lower)
+    ):
+        if "akuma" in FRAME_DATA:
+            mentioned_chars.append("akuma")
     
     # Check for BNB/Combo requests
     bnb_keywords = ["combo", "combos", "bnb", "bnbs", "bread and butter", "route", "routes"]
@@ -1236,6 +1335,13 @@ def find_moves_in_text(text):
         or re.search(r"\bsuper\s*build\b", text_lower)
         or re.search(r"\bsa\s*gain\b", text_lower)
     )
+    range_alias_query = bool(
+        (
+            re.search(r"\brange\b", text_lower)
+            or re.search(r"\blength\b", text_lower)
+        )
+        and not re.search(r"\bin\s+range\b", text_lower)
+    )
     property_alias_flags = {
         "startup": startup_alias_query
         or bool(re.search(r"\bstart\s*up\b|\bstartup\b", text_lower)),
@@ -1250,6 +1356,7 @@ def find_moves_in_text(text):
         "stun": bool(re.search(r"\bhitstun\b|\bblockstun\b|\bstun\b", text_lower)),
         "hitconfirm": hitconfirm_alias_query,
         "super_gain": super_gain_alias_query,
+        "range": range_alias_query,
     }
     property_match_count = sum(1 for matched in property_alias_flags.values() if matched)
     table_intent_query = bool(
@@ -1283,6 +1390,7 @@ def find_moves_in_text(text):
         or startup_alias_query
         or hitconfirm_alias_query
         or super_gain_alias_query
+        or range_alias_query
         or target_combo_query
         or gif_query
     )
@@ -1381,6 +1489,24 @@ def find_moves_in_text(text):
             "od", "ex",
         }
         query_has_explicit_strength = any(token in query_strength_tokens for token in text_tokens)
+        query_wants_od_strength = bool(re.search(r"\b(od|ex)\b", text_lower))
+        query_wants_non_od_strength = bool(
+            re.search(r"\b(lp|mp|hp|lk|mk|hk|light|medium|heavy|l|m|h)\b", text_lower)
+        )
+        akuma_followup_alias = None
+        air_fireball_context = bool(
+            re.search(
+                r"\b(?:air|aerial)\s+fireball\b|\bair\s+hadoken\b",
+                text_lower,
+            )
+        )
+        air_sa1_context = bool(
+            re.search(
+                r"\b(?:air|aerial)\s*(?:sa\s*1|super\s*art\s*1|super\s*1|level\s*1)\b"
+                r"|\b(?:sa\s*1|super\s*art\s*1|super\s*1|level\s*1)\s*(?:air|aerial)\b",
+                text_lower,
+            )
+        )
         air_tatsu_context = bool(
             re.search(
                 r"\b(?:air|aerial)\s+tatsu\b|\b(?:air|aerial)\s+tatsumaki\b|\btatsu\s*\(air\)\b|\bj\.?\s*214k\b",
@@ -1426,6 +1552,38 @@ def find_moves_in_text(text):
             ):
                 if "quick dash" not in extra_inputs:
                     extra_inputs.append("quick dash")
+
+        if "akuma" in mentioned_chars:
+            has_od_strength = bool(re.search(r"\b(od|ex)\b", text_lower))
+
+            if air_sa1_context and "tenma gozanku" not in extra_inputs:
+                extra_inputs.append("tenma gozanku")
+
+            if re.search(r"\b(?:demon\s+)?gou\s+rasen\b", text_lower):
+                akuma_followup_alias = "od demon gou rasen"
+            elif re.search(r"\b(?:demon\s+)?gou\s+zanku\b", text_lower):
+                akuma_followup_alias = "od demon gou zanku"
+            elif re.search(r"\b(?:demon\s+)?(?:low(?:\s+slash)?|slide)\b", text_lower):
+                akuma_followup_alias = "od demon low" if has_od_strength else "demon low"
+            elif re.search(r"\b(?:demon\s+)?(?:guillotine|chop|overhead)\b", text_lower):
+                akuma_followup_alias = "od chop" if has_od_strength else "chop"
+            elif (
+                re.search(r"\b(?:blade\s+kick|divekick|dive\s+kick)\b", text_lower)
+                and re.search(r"\b(?:demon|flip|raid)\b", text_lower)
+            ):
+                akuma_followup_alias = (
+                    "od demon flip divekick" if has_od_strength else "demon flip divekick"
+                )
+            elif re.search(r"\b(?:demon\s+)?(?:swoop|empty|stop|feint)\b", text_lower):
+                akuma_followup_alias = "od empty" if has_od_strength else "empty"
+
+            if akuma_followup_alias:
+                if akuma_followup_alias not in extra_inputs:
+                    extra_inputs.append(akuma_followup_alias)
+                potential_inputs = [
+                    token for token in potential_inputs
+                    if token not in {"dive kick", "divekick"}
+                ]
 
         def is_special_motion_num_cmd(num_cmd_raw):
             compact = re.sub(r"[^a-z0-9]", "", str(num_cmd_raw).lower())
@@ -1501,6 +1659,22 @@ def find_moves_in_text(text):
                     if not base_in_query and base_name == "spd":
                         base_in_query = "command" in text_tokens and "grab" in text_tokens
                     if not base_in_query:
+                        continue
+                    if (
+                        air_fireball_context
+                        and base_name == "fireball"
+                        and "air fireball" in special_base_map
+                    ):
+                        continue
+                    if len(prompt_variants) == 2:
+                        od_variants = [row for row in prompt_variants if row_is_od_variant(row)]
+                        non_od_variants = [row for row in prompt_variants if not row_is_od_variant(row)]
+                        if len(od_variants) == 1 and len(non_od_variants) == 1:
+                            chosen_variant = od_variants[0] if query_wants_od_strength else non_od_variants[0]
+                            if chosen_variant not in results:
+                                results.append(chosen_variant)
+                            continue
+                    if char == "akuma" and base_name == "demon flip":
                         continue
                     if (
                         air_tatsu_context
@@ -1748,6 +1922,24 @@ def find_moves_in_text(text):
             "tensho kicks",
             "dive kick",
             "divekick",
+            "demon flip",
+            "demon raid",
+            "demon low slash",
+            "demon guillotine",
+            "demon blade kick",
+            "demon swoop",
+            "demon gou zanku",
+            "demon gou rasen",
+            "teleport",
+            "ashura",
+            "ashura senku",
+            "raging demon",
+            "tenma",
+            "gozanku",
+            "air fireball",
+            "aerial fireball",
+            "air hadoken",
+            "zanku",
             "air tatsu",
             "aerial tatsu",
             "air tatsumaki",
@@ -1789,6 +1981,19 @@ def find_moves_in_text(text):
                 if token == "ball" and "blanka" not in text_lower:
                     continue
                 extra_inputs.append(token)
+        if "akuma" in mentioned_chars:
+            if re.search(r"\bback(?:ward)?\s+teleport\b", text_lower):
+                extra_inputs = [token for token in extra_inputs if token != "teleport"]
+                if "back teleport" not in extra_inputs:
+                    extra_inputs.insert(0, "back teleport")
+            elif re.search(r"\btele(?:port)?\s+back(?:ward)?\b", text_lower):
+                extra_inputs = [token for token in extra_inputs if token != "teleport"]
+                if "teleport back" not in extra_inputs:
+                    extra_inputs.insert(0, "teleport back")
+            elif re.search(r"\bforward\s+teleport\b", text_lower):
+                extra_inputs = [token for token in extra_inputs if token != "teleport"]
+                if "forward teleport" not in extra_inputs:
+                    extra_inputs.insert(0, "forward teleport")
         ordered_inputs = []
         for inp in extra_inputs + potential_inputs:
             if inp and inp not in ordered_inputs:
@@ -2081,6 +2286,111 @@ def find_moves_in_text(text):
                 if filtered_results:
                     results = filtered_results
 
+        if air_fireball_context and results:
+            mentioned_air_fireball_chars = set(mentioned_chars) & {"akuma"}
+            if mentioned_air_fireball_chars:
+                allow_demon_fireball = any(token in text_tokens for token in {"demon", "flip", "raid"})
+                filtered_results = []
+                for row in results:
+                    row_char_key = normalize_char_name(row.get("char_name", ""))
+                    row_char_matches = any(
+                        normalize_char_name(char) == row_char_key
+                        for char in mentioned_air_fireball_chars
+                    )
+                    if not row_char_matches:
+                        filtered_results.append(row)
+                        continue
+                    move_name = str(row.get("moveName", "")).lower()
+                    cmn_name = str(row.get("cmnName", "")).lower()
+                    num_cmd = str(row.get("numCmd", "")).lower()
+                    is_air_fireball_row = (
+                        "air fireball" in cmn_name
+                        or "zanku" in move_name
+                        or "zanku" in cmn_name
+                        or "(air)" in num_cmd
+                    )
+                    if not is_air_fireball_row:
+                        continue
+                    if not allow_demon_fireball and ("demon" in move_name or "demon" in cmn_name):
+                        continue
+                    filtered_results.append(row)
+                if filtered_results:
+                    results = filtered_results
+                else:
+                    fallback_input = "od zanku hadoken" if query_wants_od_strength else "zanku hadoken"
+                    fallback_row = lookup_frame_data("akuma", fallback_input)
+                    if fallback_row:
+                        results = [fallback_row]
+
+        if air_sa1_context and results:
+            mentioned_air_sa1_chars = set(mentioned_chars) & {"akuma"}
+            if mentioned_air_sa1_chars:
+                filtered_results = []
+                for row in results:
+                    row_char_key = normalize_char_name(row.get("char_name", ""))
+                    row_char_matches = any(
+                        normalize_char_name(char) == row_char_key
+                        for char in mentioned_air_sa1_chars
+                    )
+                    if not row_char_matches:
+                        filtered_results.append(row)
+                        continue
+                    move_name = str(row.get("moveName", "")).lower()
+                    cmn_name = str(row.get("cmnName", "")).lower()
+                    num_cmd = str(row.get("numCmd", "")).lower()
+                    is_air_sa1_row = (
+                        "tenma" in move_name
+                        or "gozanku" in move_name
+                        or (
+                            "super art level 1" in cmn_name
+                            and ("air" in cmn_name or "(air)" in num_cmd)
+                        )
+                    )
+                    if is_air_sa1_row:
+                        filtered_results.append(row)
+                if filtered_results:
+                    results = filtered_results
+                else:
+                    fallback_row = lookup_frame_data("akuma", "tenma gozanku")
+                    if fallback_row:
+                        results = [fallback_row]
+
+        if akuma_followup_alias and results:
+            alias_lower = akuma_followup_alias.lower()
+            followup_keyword = None
+            if "gou rasen" in alias_lower:
+                followup_keyword = "gou rasen"
+            elif "gou zanku" in alias_lower:
+                followup_keyword = "gou zanku"
+            elif "low" in alias_lower or "slide" in alias_lower:
+                followup_keyword = "low slash"
+            elif "chop" in alias_lower or "guillotine" in alias_lower:
+                followup_keyword = "guillotine"
+            elif "divekick" in alias_lower or "blade kick" in alias_lower:
+                followup_keyword = "blade kick"
+            elif any(token in alias_lower for token in ("swoop", "empty", "stop", "feint")):
+                followup_keyword = "swoop"
+
+            if followup_keyword:
+                filtered_results = []
+                for row in results:
+                    row_char = normalize_char_name(row.get("char_name", ""))
+                    if row_char != "akuma":
+                        filtered_results.append(row)
+                        continue
+                    move_name = str(row.get("moveName", "")).lower()
+                    cmn_name = str(row.get("cmnName", "")).lower()
+                    if (
+                        followup_keyword == "blade kick"
+                        and "demon" not in move_name
+                        and "demon" not in cmn_name
+                    ):
+                        continue
+                    if followup_keyword in move_name or followup_keyword in cmn_name:
+                        filtered_results.append(row)
+                if filtered_results:
+                    results = filtered_results
+
     if special_prompt_blocks and (not query_has_explicit_strength or (special_grab_query and not results)):
         results = []
 
@@ -2193,6 +2503,7 @@ def find_moves_in_text(text):
         cancel = clean(move_data.get('xx', '-'))
         damage = clean(move_data.get('dmg', '-'))
         guard = clean(move_data.get('atkLvl', '-'))
+        atk_range = format_attack_range_for_table(move_data)
         on_hit = clean(move_data.get('onHit', '-'))
         on_block = clean(move_data.get('onBlock', '-'))
         extra_info = clean(move_data.get('extraInfo', '-')).replace('[', '').replace(']', '').replace('"', '')
@@ -2230,6 +2541,7 @@ def find_moves_in_text(text):
             f"Cancel: {cancel}\n"
             f"Damage: {damage}\n"
             f"Guard: {guard}\n"
+            f"Range: {atk_range}\n"
             f"On Hit: {on_hit} // On Block: {on_block}\n"
             f"{gauge_info}"
             f"{stun_info}"
@@ -2280,6 +2592,7 @@ def find_moves_in_text(text):
         "startup_alias_query": startup_alias_query,
         "hitconfirm_alias_query": hitconfirm_alias_query,
         "super_gain_alias_query": super_gain_alias_query,
+        "range_alias_query": range_alias_query,
         "property_only_query": property_only_query,
         "target_combo_query": target_combo_query,
         "missing_scrolls_query": missing_scrolls_query,
@@ -2588,6 +2901,7 @@ def lookup_frame_data(character, move_input):
         "sa1": "super art level 1",
         "sa2": "super art level 2",
         "sa3": "super art level 3",
+        "raging demon": "shun goku satsu",
         "sway": "juggling sway",
         "juggling sway": "juggling sway",
         "jus cool": "jus cool",
@@ -2806,6 +3120,114 @@ def lookup_frame_data(character, move_input):
             "214kk air": "od shiku-sen",
         },
         "akuma": {
+            "demon flip": "demon raid",
+            "od demon flip": "od demon raid",
+            "ex demon flip": "od demon raid",
+            "teleport": "ashura senku (forward)",
+            "forward teleport": "ashura senku (forward)",
+            "fwd teleport": "ashura senku (forward)",
+            "back teleport": "ashura senku (backward)",
+            "backward teleport": "ashura senku (backward)",
+            "teleport back": "ashura senku (backward)",
+            "teleport backward": "ashura senku (backward)",
+            "tele back": "ashura senku (backward)",
+            "ashura senku": "ashura senku (forward)",
+            "ashura": "ashura senku (forward)",
+            "raging demon": "shun goku satsu",
+            "air sa1": "tenma gozanku",
+            "aerial sa1": "tenma gozanku",
+            "sa1 air": "tenma gozanku",
+            "sa 1 air": "tenma gozanku",
+            "air super art 1": "tenma gozanku",
+            "aerial super art 1": "tenma gozanku",
+            "air super 1": "tenma gozanku",
+            "aerial super 1": "tenma gozanku",
+            "air level 1": "tenma gozanku",
+            "aerial level 1": "tenma gozanku",
+            "tenma": "tenma gozanku",
+            "tenma gozanku": "tenma gozanku",
+            "air fireball": "zanku hadoken",
+            "aerial fireball": "zanku hadoken",
+            "air hadoken": "zanku hadoken",
+            "air zanku": "zanku hadoken",
+            "zanku": "zanku hadoken",
+            "l zanku": "zanku hadoken",
+            "m zanku": "zanku hadoken",
+            "h zanku": "zanku hadoken",
+            "l zanku hadoken": "zanku hadoken",
+            "m zanku hadoken": "zanku hadoken",
+            "h zanku hadoken": "zanku hadoken",
+            "light zanku": "zanku hadoken",
+            "medium zanku": "zanku hadoken",
+            "heavy zanku": "zanku hadoken",
+            "light zanku hadoken": "zanku hadoken",
+            "medium zanku hadoken": "zanku hadoken",
+            "heavy zanku hadoken": "zanku hadoken",
+            "l air fireball": "zanku hadoken",
+            "m air fireball": "zanku hadoken",
+            "h air fireball": "zanku hadoken",
+            "light air fireball": "zanku hadoken",
+            "medium air fireball": "zanku hadoken",
+            "heavy air fireball": "zanku hadoken",
+            "od air fireball": "od zanku hadoken",
+            "ex air fireball": "od zanku hadoken",
+            "od air hadoken": "od zanku hadoken",
+            "ex air hadoken": "od zanku hadoken",
+            "od zanku": "od zanku hadoken",
+            "ex zanku": "od zanku hadoken",
+            "od zanku hadoken": "od zanku hadoken",
+            "ex zanku hadoken": "od zanku hadoken",
+            "demon raid": "demon raid",
+            "od demon raid": "od demon raid",
+            "ex demon raid": "od demon raid",
+            "demon low slash": "demon low slash",
+            "demon low": "demon low slash",
+            "demon slide": "demon low slash",
+            "od demon low slash": "od demon raid > demon low slash",
+            "ex demon low slash": "od demon raid > demon low slash",
+            "od demon low": "od demon raid > demon low slash",
+            "ex demon low": "od demon raid > demon low slash",
+            "od demon slide": "od demon raid > demon low slash",
+            "ex demon slide": "od demon raid > demon low slash",
+            "demon guillotine": "demon guillotine",
+            "demon chop": "demon guillotine",
+            "chop": "demon guillotine",
+            "demon overhead": "demon guillotine",
+            "od demon guillotine": "od demon raid > demon guillotine",
+            "ex demon guillotine": "od demon raid > demon guillotine",
+            "od chop": "od demon raid > demon guillotine",
+            "ex chop": "od demon raid > demon guillotine",
+            "demon blade kick": "demon blade kick",
+            "demon flip dive kick": "demon blade kick",
+            "demon flip divekick": "demon blade kick",
+            "demon dive kick": "demon blade kick",
+            "demon divekick": "demon blade kick",
+            "od demon blade kick": "od demon raid > demon blade kick",
+            "ex demon blade kick": "od demon raid > demon blade kick",
+            "od demon flip dive kick": "od demon raid > demon blade kick",
+            "od demon flip divekick": "od demon raid > demon blade kick",
+            "ex demon flip dive kick": "od demon raid > demon blade kick",
+            "ex demon flip divekick": "od demon raid > demon blade kick",
+            "demon swoop": "demon swoop",
+            "demon feint": "demon swoop",
+            "demon empty": "demon swoop",
+            "demon stop": "demon swoop",
+            "empty": "demon swoop",
+            "stop": "demon swoop",
+            "od demon swoop": "od demon raid > demon swoop",
+            "ex demon swoop": "od demon raid > demon swoop",
+            "od empty": "od demon raid > demon swoop",
+            "ex empty": "od demon raid > demon swoop",
+            "od stop": "od demon raid > demon swoop",
+            "ex stop": "od demon raid > demon swoop",
+            "demon gou zanku": "od demon gou zanku",
+            "gou zanku": "od demon gou zanku",
+            "demon gou rasen": "od demon gou rasen",
+            "gou rasen": "od demon gou rasen",
+            "od demon gou zanku": "od demon raid > od demon gou zanku",
+            "ex demon gou zanku": "od demon raid > od demon gou zanku",
+            "od demon gou rasen": "od demon raid > od demon gou rasen",
+            "ex demon gou rasen": "od demon raid > od demon gou rasen",
             "dive kick": "tenmaku blade kick",
             "divekick": "tenmaku blade kick",
             "l dive kick": "tenmaku blade kick",
@@ -3442,6 +3864,38 @@ def lookup_hitbox_gif_link(row):
     num_cmd_candidates = build_num_cmd_candidates_for_gif(row)
     row_is_jump = "jump" in row_tokens
 
+    if (
+        char_key == "akuma"
+        and (
+            "zanku hadoken" in row_move_name_norm
+            or "air fireball" in row_cmn_name_norm
+        )
+        and "demon" not in row_move_name_norm
+        and "demon" not in row_cmn_name_norm
+    ):
+        row_is_od = (
+            str(row.get("moveName", "")).lower().strip().startswith(("od ", "ex "))
+            or row_num_cmd.endswith("pp")
+        )
+        preferred_names = ["od zanku hadoken"] if row_is_od else ["l zanku hadoken", "zanku hadoken"]
+
+        for preferred_name in preferred_names:
+            for gif_row in gif_rows:
+                move_link = str(gif_row.get("moveLink", "")).strip()
+                if not move_link:
+                    continue
+                gif_name_norm = normalize_move_name_for_gif_text(gif_row.get("moveName", ""))
+                if preferred_name in gif_name_norm and "demon" not in gif_name_norm:
+                    return move_link
+
+        for gif_row in gif_rows:
+            move_link = str(gif_row.get("moveLink", "")).strip()
+            if not move_link:
+                continue
+            gif_name_norm = normalize_move_name_for_gif_text(gif_row.get("moveName", ""))
+            if "zanku hadoken" in gif_name_norm and "demon" not in gif_name_norm:
+                return move_link
+
     best_score = -1
     best_link = None
 
@@ -3857,11 +4311,27 @@ def check_punish(text_lower, results):
     except Exception as e:
         return f"Punish calculation error: {e}"
 
+
+def get_attack_range_details(row):
+    raw_value = str(row.get("atkRange", "")).strip()
+    if is_missing_attack_range_value(raw_value):
+        return "", False
+    return raw_value, True
+
+
+def format_attack_range_for_table(row):
+    range_value, has_numeric_range = get_attack_range_details(row)
+    if has_numeric_range:
+        return range_value
+    return "not on supercombo scrolls"
+
 def format_frame_data(row):
     """Format a frame data row into readable text."""
+    atk_range = format_attack_range_for_table(row)
     return (
         f"Move: {row['moveName']} ({row['numCmd']})\n"
         f"Startup: {row['startup']}f | Active: {row['active']}f | Recovery: {row['recovery']}f\n"
+        f"Range: {atk_range}\n"
         f"On Hit: {row['onHit']} | On Block: {row['onBlock']}\n"
         f"Damage: {row['dmg']} | Attack Type: {row['atkLvl']}\n"
         f"Notes: {row.get('extraInfo', '')}"
@@ -3937,6 +4407,48 @@ def format_super_gain_only_reply(rows):
     return "\n".join(lines[:4])
 
 
+def format_range_only_reply(rows):
+    unique_rows = []
+    seen = set()
+    for row in rows:
+        key = (
+            row.get("char_name", "Unknown"),
+            row.get("moveName", "Unknown"),
+            row.get("numCmd", "?"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_rows.append(row)
+
+    if not unique_rows:
+        return ""
+
+    if len(unique_rows) == 1:
+        row = unique_rows[0]
+        range_value, has_numeric_range = get_attack_range_details(row)
+        if not has_numeric_range:
+            return RANGE_SCROLLS_MISSING_TEXT
+        char_name = row.get("char_name", "Unknown")
+        move_name = row.get("moveName", "Unknown")
+        num_cmd = row.get("numCmd", "?")
+        return f"{char_name}'s {move_name} ({num_cmd}) range is {range_value}."
+
+    lines = []
+    for row in unique_rows[:4]:
+        char_name = row.get("char_name", "Unknown")
+        move_name = row.get("moveName", "Unknown")
+        num_cmd = row.get("numCmd", "?")
+        range_value, has_numeric_range = get_attack_range_details(row)
+        if has_numeric_range:
+            lines.append(f"{char_name}'s {move_name} ({num_cmd}) range is {range_value}.")
+        else:
+            lines.append(
+                f"{char_name}'s {move_name} ({num_cmd}): {RANGE_SCROLLS_MISSING_TEXT}"
+            )
+    return "\n".join(lines)
+
+
 def truncate_embed_value(value, limit):
     text = str(value or "").strip()
     if len(text) <= limit:
@@ -3978,6 +4490,7 @@ def build_frame_embed(row):
     cancel = clean_embed_value(row.get("xx", "-"))
     damage = clean_embed_value(row.get("dmg", "-"))
     guard = clean_embed_value(row.get("atkLvl", "-"))
+    atk_range = format_attack_range_for_table(row)
     on_hit = clean_embed_value(row.get("onHit", "-"))
     on_block = clean_embed_value(row.get("onBlock", "-"))
 
@@ -4004,6 +4517,7 @@ def build_frame_embed(row):
 
     add_embed_field(embed, "Damage", damage, inline=True)
     add_embed_field(embed, "Guard", guard, inline=True)
+    add_embed_field(embed, "Range", atk_range, inline=True)
     add_embed_field(embed, "Drive Gain", drive_gain, inline=True)
 
     add_embed_field(embed, "Drive Dmg", f"Hit: {drive_hit} / Block: {drive_block}", inline=True)
@@ -4046,6 +4560,7 @@ def sanitize_embed_followup_text(text):
         "Startup:",
         "Active:",
         "Recovery:",
+        "Range:",
         "On Hit:",
         "On Block:",
         "Drive Dmg",
@@ -4358,7 +4873,7 @@ async def reminder_loop():
 
 async def send_daily_messages(channel):
     """Send scheduled daily messages to the channel."""
-    print("Dispatching messages...")
+    print("[daily-message] Dispatching 4-line batch.", flush=True)
     messages = [
         "Hello everyone",
         "How are you today?",
@@ -4371,13 +4886,13 @@ async def send_daily_messages(channel):
             
             await asyncio.sleep(1) 
         except Exception as e:
-            print(f"Dispatch error: {e}")
-    print("Messages dispatched successfully.")
+            print(f"[daily-message] Dispatch error: {e}", flush=True)
+    print("[daily-message] Batch dispatched successfully.", flush=True)
 
 
 async def send_generated_encouragement(channel, source_label="scheduled"):
     if not LLM_ENABLED:
-        print(f"{source_label.capitalize()} encouragement skipped: LLM disabled.", flush=True)
+        print(f"[encouragement] {source_label} skipped: LLM disabled.", flush=True)
         return
 
     selected_prompt = random.choice(ENCOURAGEMENT_PROMPTS)
@@ -4398,11 +4913,11 @@ async def send_generated_encouragement(channel, source_label="scheduled"):
         reply_text = await get_llm_response(llm_messages)
         await channel.send(reply_text)
         print(
-            f"{source_label.capitalize()} encouragement ({prompt_kind}) sent at {datetime.datetime.now().isoformat()}",
+            f"[encouragement] {source_label} ({prompt_kind}) sent at {datetime.datetime.now().isoformat()}",
             flush=True,
         )
     except Exception as e:
-        print(f"{source_label.capitalize()} encouragement error: {e}", flush=True)
+        print(f"[encouragement] {source_label} error: {e}", flush=True)
 
 
 async def send_daily_damn_gg(channel, source_label="scheduled"):
@@ -4484,10 +4999,63 @@ async def background_task():
     await client.wait_until_ready()
     channel = client.get_channel(CHANNEL_ID)
     if not channel:
-        print(f"Could not find channel with ID {CHANNEL_ID}")
+        print(f"[daily-message] Could not find channel with ID {CHANNEL_ID}", flush=True)
         return
 
-    print("Bot is ready and encouragement scheduling started.", flush=True)
+    print("[daily-message] Scheduling started.", flush=True)
+
+    while not client.is_closed():
+        now = datetime.datetime.now()
+        start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        random_seconds = random.randint(0, 86399)
+        target_time = start_of_day + datetime.timedelta(seconds=random_seconds)
+
+        if target_time < now:
+            start_of_tomorrow = start_of_day + datetime.timedelta(days=1)
+            random_seconds_tomorrow = random.randint(0, 86399)
+            target_time = start_of_tomorrow + datetime.timedelta(seconds=random_seconds_tomorrow)
+            print(f"[daily-message] Daily slot elapsed. Next cycle at {target_time}", flush=True)
+        else:
+            print(f"[daily-message] Current cycle scheduled at {target_time}", flush=True)
+
+        NEXT_RUN_TIME = target_time
+        wait_seconds = (target_time - datetime.datetime.now()).total_seconds()
+        if wait_seconds > 0:
+            await asyncio.sleep(wait_seconds)
+        if client.is_closed():
+            return
+
+        await send_daily_messages(channel)
+
+        next_day = (
+            datetime.datetime.now() + datetime.timedelta(days=1)
+        ).replace(hour=0, minute=0, second=0, microsecond=0)
+        seconds_until_tomorrow = (next_day - datetime.datetime.now()).total_seconds()
+        print(
+            f"[daily-message] Done for today. Waiting {seconds_until_tomorrow / 3600:.2f} hours until midnight regeneration.",
+            flush=True,
+        )
+        NEXT_RUN_TIME = None
+        if seconds_until_tomorrow > 0:
+            await asyncio.sleep(seconds_until_tomorrow)
+
+
+async def background_encouragement_task():
+    global NEXT_ENCOURAGEMENT_TIME
+    await client.wait_until_ready()
+    if DAILY_ENCOURAGEMENT_MESSAGES <= 0:
+        print("[encouragement] Disabled: DAILY_ENCOURAGEMENT_MESSAGES <= 0", flush=True)
+        return
+
+    channel = client.get_channel(CHANNEL_ID)
+    if not channel:
+        print(f"[encouragement] Could not find channel with ID {CHANNEL_ID}", flush=True)
+        return
+
+    print(
+        f"[encouragement] Scheduling started. Target={DAILY_ENCOURAGEMENT_MESSAGES} LLM messages per day.",
+        flush=True,
+    )
 
     while not client.is_closed():
         now = datetime.datetime.now()
@@ -4500,18 +5068,22 @@ async def background_task():
             remaining_slots = get_daily_random_slots(day_start, DAILY_ENCOURAGEMENT_MESSAGES)
 
         slot_log = ", ".join(slot.strftime("%Y-%m-%d %H:%M:%S") for slot in remaining_slots)
-        print(f"Encouragement slots: {slot_log}", flush=True)
+        print(f"[encouragement] Slots ({len(remaining_slots)}): {slot_log}", flush=True)
 
-        for slot_time in remaining_slots:
-            NEXT_RUN_TIME = slot_time
+        for index, slot_time in enumerate(remaining_slots, start=1):
+            NEXT_ENCOURAGEMENT_TIME = slot_time
             wait_seconds = (slot_time - datetime.datetime.now()).total_seconds()
             if wait_seconds > 0:
                 await asyncio.sleep(wait_seconds)
             if client.is_closed():
                 return
+            print(
+                f"[encouragement] Dispatching scheduled encouragement {index}/{len(remaining_slots)}.",
+                flush=True,
+            )
             await send_generated_encouragement(channel, source_label="scheduled")
 
-        NEXT_RUN_TIME = None
+        NEXT_ENCOURAGEMENT_TIME = None
 
 
 async def background_damn_gg_task():
@@ -4594,6 +5166,8 @@ async def background_video_task():
 async def time_handler(request):
     data = {
         "target_time": str(NEXT_RUN_TIME) if NEXT_RUN_TIME else None,
+        "daily_message_time": str(NEXT_RUN_TIME) if NEXT_RUN_TIME else None,
+        "encouragement_time": str(NEXT_ENCOURAGEMENT_TIME) if NEXT_ENCOURAGEMENT_TIME else None,
         "damn_gg_time": str(NEXT_DAMN_GG_TIME) if NEXT_DAMN_GG_TIME else None,
         "video_time": str(NEXT_VIDEO_TIME) if NEXT_VIDEO_TIME else None,
     }
@@ -4613,6 +5187,7 @@ async def start_web_server():
 message_queue = None
 worker_task = None
 background_task_handle = None
+background_encouragement_task_handle = None
 background_damn_gg_task_handle = None
 background_video_task_handle = None
 reminder_task_handle = None
@@ -4748,6 +5323,7 @@ async def on_ready():
     global message_queue
     global worker_task
     global background_task_handle
+    global background_encouragement_task_handle
     global background_damn_gg_task_handle
     global background_video_task_handle
     global reminder_task_handle
@@ -4759,6 +5335,9 @@ async def on_ready():
     # start bg task
     if background_task_handle is None or background_task_handle.done():
         background_task_handle = client.loop.create_task(background_task())
+    # start encouragement task
+    if background_encouragement_task_handle is None or background_encouragement_task_handle.done():
+        background_encouragement_task_handle = client.loop.create_task(background_encouragement_task())
     # start damn gg task
     if background_damn_gg_task_handle is None or background_damn_gg_task_handle.done():
         background_damn_gg_task_handle = client.loop.create_task(background_damn_gg_task())
@@ -4775,6 +5354,11 @@ async def on_ready():
     if reminder_task_handle is None or reminder_task_handle.done():
         reminder_task_handle = client.loop.create_task(reminder_loop())
         print("Reminder loop task created.", flush=True)
+    print(
+        "[scheduler] Expected behavior active: 1 random daily 'do the thing' batch (no startup dispatch); "
+        f"{DAILY_ENCOURAGEMENT_MESSAGES} scheduled LLM encouragements per day.",
+        flush=True,
+    )
     # load frame data
     load_frame_data()
 
@@ -4790,6 +5374,7 @@ async def on_message(message):
 
     # check mention + phrase
     if client.user.mentioned_in(message) and "do the thing" in content_lower:
+        print(f"[daily-message] Manual trigger received from user_id={message.author.id}", flush=True)
         await send_daily_messages(message.channel)
         return
 
@@ -4958,6 +5543,7 @@ async def on_message(message):
     startup_alias_query = bool(fd_context_payload.get("startup_alias_query"))
     hitconfirm_alias_query = bool(fd_context_payload.get("hitconfirm_alias_query"))
     super_gain_alias_query = bool(fd_context_payload.get("super_gain_alias_query"))
+    range_alias_query = bool(fd_context_payload.get("range_alias_query"))
     property_only_query = bool(fd_context_payload.get("property_only_query"))
     target_combo_query = bool(fd_context_payload.get("target_combo_query"))
     missing_scrolls_query = bool(fd_context_payload.get("missing_scrolls_query"))
@@ -5083,6 +5669,18 @@ async def on_message(message):
         if target_combo_query and fd_context_mode == "frame" and fd_context_rows:
             await send_frame_table_response(message, fd_context_rows, fd_context_data)
             return
+        if range_alias_query and fd_context_mode == "frame" and fd_context_rows:
+            range_reply = format_range_only_reply(fd_context_rows)
+            if range_reply:
+                try:
+                    await message.reply(range_reply)
+                except Exception as reply_error:
+                    if is_deleted_message_reference_error(reply_error):
+                        print("Direct range reply target deleted. Triggering failsafe.", flush=True)
+                        await send_deleted_message_failsafe(message.channel)
+                    else:
+                        print(f"Direct range reply error: {reply_error}", flush=True)
+                return
         if super_gain_alias_query and fd_context_mode == "frame" and fd_context_rows:
             super_gain_reply = format_super_gain_only_reply(fd_context_rows)
             if super_gain_reply:
@@ -5141,7 +5739,7 @@ async def on_message(message):
                         "INSTRUCTION: The full frame table is already shown above your reply.\n"
                         " - Write a short follow-up comment (1-2 sentences) underneath the table.\n"
                         " - Do NOT reprint or restate the full table.\n"
-                        " - Do NOT output labels like Startup/Active/Recovery/On Hit/On Block/Drive/Super/Hit Confirm/Notes.\n"
+                        " - Do NOT output labels like Startup/Active/Recovery/Range/On Hit/On Block/Drive/Super/Hit Confirm/Notes.\n"
                         " - Do NOT include move lines like 'Move Name (numCmd)'.\n"
                         " - If the user asked for a comparison or takeaway, give a brief practical note using AVAILABLE DATA.\n"
                         " - If data is missing for what they asked, say you don't have the scrolls for that part.\n"
@@ -5155,7 +5753,7 @@ async def on_message(message):
                         f"{MOVE_DEFINITIONS}\n"
                         "INSTRUCTION: Answer with ONLY the specific value the user asked for in plain text.\n"
                         " - Do NOT output the full frame table for this request.\n"
-                        " - If they ask startup/active/recovery/on hit/on block/cancel/damage/drive/super gain/stun/hit confirm, return those exact values only.\n"
+                        " - If they ask startup/active/recovery/on hit/on block/cancel/damage/drive/super gain/stun/hit confirm/range, return those exact values only.\n"
                         " - Keep it concise (1-2 sentences max).\n"
                         "CRITICAL: Do NOT invent values not present in AVAILABLE DATA."
                     )
