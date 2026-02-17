@@ -49,9 +49,9 @@ LLM_CONTEXT_HISTORY_RATIO = max(
     min(0.99, float(os.getenv('LLM_CONTEXT_HISTORY_RATIO', '0.95'))),
 )
 LLM_CONTEXT_HISTORY_MAX_MESSAGES = int(
-    os.getenv('LLM_CONTEXT_HISTORY_MAX_MESSAGES', '100')
+    os.getenv('LLM_CONTEXT_HISTORY_MAX_MESSAGES', '50')
 )
-LLM_CONTEXT_HISTORY_MAX_MESSAGES = max(1, min(100, LLM_CONTEXT_HISTORY_MAX_MESSAGES))
+LLM_CONTEXT_HISTORY_MAX_MESSAGES = max(1, min(50, LLM_CONTEXT_HISTORY_MAX_MESSAGES))
 LLM_CONTEXT_SAFETY_BUFFER_CHARS = int(
     os.getenv('LLM_CONTEXT_SAFETY_BUFFER_CHARS', '12000')
 )
@@ -1464,6 +1464,11 @@ def find_moves_in_text(text):
             cleaned_inp = re.sub(r"\s+framedata$", "", inp).strip()
             cleaned_inp = re.sub(r"\s+frame\s*data$", "", cleaned_inp).strip()
             cleaned_inp = re.sub(r"\s+frame$", "", cleaned_inp).strip()
+            cleaned_inp = re.sub(
+                r"\s+(?:gif|gifs|hitbox|hitboxes)(?:\s+link)?$",
+                "",
+                cleaned_inp,
+            ).strip()
             if not cleaned_inp:
                 continue
             if cleaned_inp in strength_prefixes_for_filter and re.search(
@@ -3516,6 +3521,34 @@ def lookup_frame_data(character, move_input):
             "air headbutt": "flying headbutt",
         },
         "jp": {
+            "236p": "stribog",
+            "236 p": "stribog",
+            "236lp": "lp stribog",
+            "236 lp": "lp stribog",
+            "236mp": "mp stribog",
+            "236 mp": "mp stribog",
+            "236hp": "hp stribog",
+            "236 hp": "hp stribog",
+            "236pp": "od stribog",
+            "236 pp": "od stribog",
+            "swipe": "stribog",
+            "l swipe": "lp stribog",
+            "m swipe": "mp stribog",
+            "h swipe": "hp stribog",
+            "light swipe": "lp stribog",
+            "medium swipe": "mp stribog",
+            "heavy swipe": "hp stribog",
+            "od swipe": "od stribog",
+            "ex swipe": "od stribog",
+            "stribog": "stribog",
+            "l stribog": "lp stribog",
+            "m stribog": "mp stribog",
+            "h stribog": "hp stribog",
+            "light stribog": "lp stribog",
+            "medium stribog": "mp stribog",
+            "heavy stribog": "hp stribog",
+            "od stribog": "od stribog",
+            "ex stribog": "od stribog",
             "22p": "triglav",
             "22 p": "triglav",
             "22lp": "triglav",
@@ -3554,6 +3587,36 @@ def lookup_frame_data(character, move_input):
             "od amnesia bomb": "od amnesia: bomb",
             "22k bomb": "amnesia: bomb",
             "22kk bomb": "od amnesia: bomb",
+        },
+        "a.k.i": {
+            "236p": "serpent lash",
+            "236 p": "serpent lash",
+            "236lp": "lp serpent lash",
+            "236 lp": "lp serpent lash",
+            "236mp": "mp serpent lash",
+            "236 mp": "mp serpent lash",
+            "236hp": "hp serpent lash",
+            "236 hp": "hp serpent lash",
+            "236pp": "od serpent lash",
+            "236 pp": "od serpent lash",
+            "whip": "serpent lash",
+            "l whip": "lp serpent lash",
+            "m whip": "mp serpent lash",
+            "h whip": "hp serpent lash",
+            "light whip": "lp serpent lash",
+            "medium whip": "mp serpent lash",
+            "heavy whip": "hp serpent lash",
+            "od whip": "od serpent lash",
+            "ex whip": "od serpent lash",
+            "serpent lash": "serpent lash",
+            "l serpent lash": "lp serpent lash",
+            "m serpent lash": "mp serpent lash",
+            "h serpent lash": "hp serpent lash",
+            "light serpent lash": "lp serpent lash",
+            "medium serpent lash": "mp serpent lash",
+            "heavy serpent lash": "hp serpent lash",
+            "od serpent lash": "od serpent lash",
+            "ex serpent lash": "od serpent lash",
         },
     }
 
@@ -4200,6 +4263,16 @@ def collect_hitbox_gif_links_from_text(text, frame_rows=None, limit=3):
             move_query = extract_gif_move_query_text(text, char_key)
             if not move_query:
                 continue
+
+            resolved_row = lookup_frame_data(char_key, move_query)
+            if resolved_row:
+                move_link = lookup_hitbox_gif_link(resolved_row)
+                if move_link and move_link not in seen:
+                    seen.add(move_link)
+                    links.append(move_link)
+                    if len(links) >= limit:
+                        return True
+
             query_links = lookup_hitbox_gif_links_from_query(char_key, move_query, limit=limit)
             for move_link in query_links:
                 if move_link in seen:
@@ -4458,19 +4531,39 @@ def truncate_embed_value(value, limit):
     return text[: limit - 3] + "..."
 
 
-def clean_embed_value(value, default="-", strip_brackets=False):
+def is_missing_embed_value(value):
+    text = str(value if value is not None else "").strip().lower()
+    return text in {"", "-", "--", "n/a", "na", "none", "null", "nan"}
+
+
+def clean_embed_value(value, default="", strip_brackets=False):
     text = str(value if value is not None else "").replace("*", ",").strip()
     if strip_brackets:
         text = text.replace("[", "").replace("]", "").replace('"', "")
-    if not text:
+    if is_missing_embed_value(text):
         text = default
     return text
 
 
 def add_embed_field(embed, name, value, inline=True):
+    if is_missing_embed_value(value):
+        return
     safe_name = truncate_embed_value(name, 256) or "-"
-    safe_value = truncate_embed_value(value, 1024) or "-"
+    safe_value = truncate_embed_value(value, 1024)
+    if is_missing_embed_value(safe_value):
+        return
     embed.add_field(name=safe_name, value=safe_value, inline=inline)
+
+
+def format_hit_block_value(hit_value, block_value):
+    hit = clean_embed_value(hit_value)
+    block = clean_embed_value(block_value)
+    parts = []
+    if hit:
+        parts.append(f"Hit: {hit}")
+    if block:
+        parts.append(f"Block: {block}")
+    return " / ".join(parts)
 
 
 def build_frame_embed(row):
@@ -4484,28 +4577,28 @@ def build_frame_embed(row):
         colour=0x3998C6,
     )
 
-    startup = clean_embed_value(row.get("startup", "-"))
-    active = clean_embed_value(row.get("active", "-"))
-    recovery = clean_embed_value(row.get("recovery", "-")).replace("(", " (Whiff: ")
-    cancel = clean_embed_value(row.get("xx", "-"))
-    damage = clean_embed_value(row.get("dmg", "-"))
-    guard = clean_embed_value(row.get("atkLvl", "-"))
+    startup = clean_embed_value(row.get("startup", ""))
+    active = clean_embed_value(row.get("active", ""))
+    recovery = clean_embed_value(row.get("recovery", "")).replace("(", " (Whiff: ")
+    cancel = clean_embed_value(row.get("xx", ""))
+    damage = clean_embed_value(row.get("dmg", ""))
+    guard = clean_embed_value(row.get("atkLvl", ""))
     atk_range = format_attack_range_for_table(row)
-    on_hit = clean_embed_value(row.get("onHit", "-"))
-    on_block = clean_embed_value(row.get("onBlock", "-"))
+    on_hit = clean_embed_value(row.get("onHit", ""))
+    on_block = clean_embed_value(row.get("onBlock", ""))
 
-    drive_hit = clean_embed_value(row.get("DDoH", "-"))
-    drive_block = clean_embed_value(row.get("DDoB", "-"))
-    drive_gain = clean_embed_value(row.get("DGain", "-"))
-    super_hit = clean_embed_value(row.get("SelfSoH", "-"))
-    super_block = clean_embed_value(row.get("SelfSoB", "-"))
+    drive_hit = clean_embed_value(row.get("DDoH", ""))
+    drive_block = clean_embed_value(row.get("DDoB", ""))
+    drive_gain = clean_embed_value(row.get("DGain", ""))
+    super_hit = clean_embed_value(row.get("SelfSoH", ""))
+    super_block = clean_embed_value(row.get("SelfSoB", ""))
 
-    stun_hit = clean_embed_value(row.get("hitstun", "-"))
-    stun_block = clean_embed_value(row.get("blockstun", "-"))
+    stun_hit = clean_embed_value(row.get("hitstun", ""))
+    stun_block = clean_embed_value(row.get("blockstun", ""))
 
-    hc_sp = clean_embed_value(row.get("hcWinSpCa", "-"))
-    hc_tc = clean_embed_value(row.get("hcWinTc", "-"))
-    hc_notes = clean_embed_value(row.get("hcWinNotes", "-"), strip_brackets=True)
+    hc_sp = clean_embed_value(row.get("hcWinSpCa", ""))
+    hc_tc = clean_embed_value(row.get("hcWinTc", ""))
+    hc_notes = clean_embed_value(row.get("hcWinNotes", ""), strip_brackets=True)
 
     add_embed_field(embed, "Startup", startup, inline=True)
     add_embed_field(embed, "Active", active, inline=True)
@@ -4520,16 +4613,16 @@ def build_frame_embed(row):
     add_embed_field(embed, "Range", atk_range, inline=True)
     add_embed_field(embed, "Drive Gain", drive_gain, inline=True)
 
-    add_embed_field(embed, "Drive Dmg", f"Hit: {drive_hit} / Block: {drive_block}", inline=True)
-    add_embed_field(embed, "Super Gain", f"Hit: {super_hit} / Block: {super_block}", inline=True)
-    add_embed_field(embed, "Stun", f"Hit: {stun_hit} / Block: {stun_block}", inline=True)
+    add_embed_field(embed, "Drive Dmg", format_hit_block_value(drive_hit, drive_block), inline=True)
+    add_embed_field(embed, "Super Gain", format_hit_block_value(super_hit, super_block), inline=True)
+    add_embed_field(embed, "Stun", format_hit_block_value(stun_hit, stun_block), inline=True)
 
     add_embed_field(embed, "Hit Confirm (Sp/Su)", hc_sp, inline=True)
     add_embed_field(embed, "Hit Confirm (TC)", hc_tc, inline=True)
     add_embed_field(embed, "Hit Confirm Notes", hc_notes, inline=False)
 
-    extra_info = clean_embed_value(row.get("extraInfo", "-"), strip_brackets=True)
-    if extra_info != "-":
+    extra_info = clean_embed_value(row.get("extraInfo", ""), strip_brackets=True)
+    if extra_info:
         embed.set_footer(text=truncate_embed_value(extra_info, 2048))
 
     return embed
