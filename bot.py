@@ -186,8 +186,9 @@ SYSTEM_PROMPT = (
     "Focus on ONE single topic or story per response. Do not ramble or stray off topic. "
     "Do not end responses with a question unless necessary. Keep it casual and natural. "
     "Always speak the same language as the prompt. You are an English speaker by default unless prompted otherwise. "
-    "2 sentence limit. Keep it concise. "
-    "Answer the user's question DIRECTLY first. "
+    "Keep responses concise. For casual chat or banter, 2-3 sentences is enough. "
+    "When someone asks a genuine question — about frame data, fighting game concepts, coaching, or any topic — give a COMPLETE and USEFUL answer."
+    "Answer the user's question DIRECTLY first. Then, optionally, add one brief in-character remark. "
     "No tangents. Stay on topic. Keep responses concise and relevant. "
     "NEVER output your internal thought process. Do not use parentheses for meta-commentary. "
     "If MEDIA_CONTEXT is present and viewable=true, explicitly acknowledge the media and mention one concrete visual detail in your first sentence. "
@@ -1235,15 +1236,18 @@ def find_moves_in_text(text):
     tc_ambiguous_inputs = set()
     text_tokens = re.findall(r"[a-z0-9]+", text_lower)
 
-    def tokens_in_text(needle_tokens):
+    def tokens_in_haystack(haystack_tokens, needle_tokens):
         if not needle_tokens:
             return False
         if len(needle_tokens) == 1:
-            return needle_tokens[0] in text_tokens
-        for i in range(len(text_tokens) - len(needle_tokens) + 1):
-            if text_tokens[i : i + len(needle_tokens)] == needle_tokens:
+            return needle_tokens[0] in haystack_tokens
+        for i in range(len(haystack_tokens) - len(needle_tokens) + 1):
+            if haystack_tokens[i : i + len(needle_tokens)] == needle_tokens:
                 return True
         return False
+
+    def tokens_in_text(needle_tokens):
+        return tokens_in_haystack(text_tokens, needle_tokens)
     
     # 1. Identify which characters are mentioned
     mentioned_chars = []
@@ -1382,6 +1386,7 @@ def find_moves_in_text(text):
     wants_comparison = (
         any(kw in text_lower for kw in comparison_keywords)
         or re.search(r"\bvs\b", text_lower)
+        or (len(mentioned_chars) >= 2 and re.search(r"\band\b", text_lower))
     )
     wants_frame_data = (
         any(kw in text_lower for kw in frame_keywords)
@@ -1408,6 +1413,7 @@ def find_moves_in_text(text):
     query_has_explicit_strength = False
     explicit_move_attempt = False
     missing_scrolls_query = False
+    comparison_char_inputs = {}
     if wants_frame_data:
         # 2. Heuristic: For each mentioned character, search for moves mentioned nearby?
         # Simpler approach: Check if any move inputs are present in the text
@@ -1590,6 +1596,34 @@ def find_moves_in_text(text):
                     if token not in {"dive kick", "divekick"}
                 ]
 
+        if "jp" in mentioned_chars:
+            jp_swipe_aliases = [
+                (r"\b(?:od|ex)\s+swipe\b", "od swipe"),
+                (r"\b(?:l|light|lp)\s+swipe\b", "l swipe"),
+                (r"\b(?:m|medium|mp)\s+swipe\b", "m swipe"),
+                (r"\b(?:h|heavy|hp)\s+swipe\b", "h swipe"),
+                (r"\bswipe\b", "swipe"),
+            ]
+            for pattern, alias_token in jp_swipe_aliases:
+                if re.search(pattern, text_lower):
+                    if alias_token not in extra_inputs:
+                        extra_inputs.append(alias_token)
+                    break
+
+        if "a.k.i" in mentioned_chars:
+            aki_whip_aliases = [
+                (r"\b(?:od|ex)\s+whip\b", "od whip"),
+                (r"\b(?:l|light|lp)\s+whip\b", "l whip"),
+                (r"\b(?:m|medium|mp)\s+whip\b", "m whip"),
+                (r"\b(?:h|heavy|hp)\s+whip\b", "h whip"),
+                (r"\bwhip\b", "whip"),
+            ]
+            for pattern, alias_token in aki_whip_aliases:
+                if re.search(pattern, text_lower):
+                    if alias_token not in extra_inputs:
+                        extra_inputs.append(alias_token)
+                    break
+
         def is_special_motion_num_cmd(num_cmd_raw):
             compact = re.sub(r"[^a-z0-9]", "", str(num_cmd_raw).lower())
             if not compact or ">" in str(num_cmd_raw):
@@ -1599,6 +1633,20 @@ def find_moves_in_text(text):
                 "214214", "236236", "360", "720", "22",
             )
             return compact.startswith(motion_prefixes)
+
+        def get_special_canonical_base_name(row):
+            raw_name = str(row.get("cmnName", "")).lower().strip()
+            if not raw_name:
+                raw_name = str(row.get("moveName", "")).lower().strip()
+            if not raw_name:
+                return ""
+            base_name = re.sub(r"^(od|ex)\s+", "", raw_name)
+            base_name = re.sub(
+                r"^(lp|mp|hp|lk|mk|hk|pp|kk|light|medium|heavy|l|m|h)\s+",
+                "",
+                base_name,
+            ).strip()
+            return re.sub(r"\s*\(charged\)", "", base_name).strip()
 
         command_jump_notation_present = bool(
             re.search(
@@ -1906,6 +1954,11 @@ def find_moves_in_text(text):
             "fireball",
             "boom",
             "headbutt",
+            "clap",
+            "claps",
+            "neko damashi",
+            "oicho",
+            "oicho throw",
             "ball",
             # 28K moves
             "vertical rolling attack",
@@ -1935,6 +1988,19 @@ def find_moves_in_text(text):
             "demon swoop",
             "demon gou zanku",
             "demon gou rasen",
+            "burn kick",
+            "burnkick",
+            "burn kicks",
+            "burnkicks",
+            "burning kick",
+            "burning kicks",
+            "air burn kick",
+            "air burnkick",
+            "air burning kick",
+            "air burning kicks",
+            "aerial burn kick",
+            "aerial burnkick",
+            "aerial burning kick",
             "teleport",
             "ashura",
             "ashura senku",
@@ -2004,6 +2070,59 @@ def find_moves_in_text(text):
             if inp and inp not in ordered_inputs:
                 ordered_inputs.append(inp)
         potential_inputs = ordered_inputs
+
+        if wants_comparison and (potential_inputs or extra_inputs) and len(mentioned_chars) >= 2:
+            side_segments = [
+                segment.strip()
+                for segment in re.split(r"\b(?:vs|versus|and)\b", text_lower)
+                if segment.strip()
+            ]
+            if len(side_segments) >= 2:
+                assigned_chars = set()
+
+                def segment_mentions_character(segment_text, char_key):
+                    segment_tokens = re.findall(r"[a-z0-9]+", segment_text)
+                    if not segment_tokens:
+                        return False
+                    char_tokens = re.findall(r"[a-z0-9]+", str(char_key).lower())
+                    if char_tokens and tokens_in_haystack(segment_tokens, char_tokens):
+                        return True
+                    for alias, canonical in CHARACTER_ALIASES.items():
+                        if normalize_char_name(canonical) != normalize_char_name(char_key):
+                            continue
+                        alias_tokens = re.findall(r"[a-z0-9]+", str(alias).lower())
+                        if alias_tokens and tokens_in_haystack(segment_tokens, alias_tokens):
+                            return True
+                    return False
+
+                for side_text in side_segments:
+                    side_chars = [
+                        char for char in mentioned_chars
+                        if segment_mentions_character(side_text, char)
+                    ]
+                    if not side_chars:
+                        continue
+
+                    if len(side_chars) == 1:
+                        target_char = side_chars[0]
+                    else:
+                        target_char = next(
+                            (char for char in side_chars if char not in assigned_chars),
+                            side_chars[0],
+                        )
+
+                    side_inputs = []
+                    for inp in potential_inputs:
+                        inp_norm = str(inp or "").strip().lower()
+                        if not inp_norm:
+                            continue
+                        if re.search(rf"\b{re.escape(inp_norm)}\b", side_text):
+                            if inp not in side_inputs:
+                                side_inputs.append(inp)
+
+                    if side_inputs:
+                        comparison_char_inputs[target_char] = side_inputs
+                        assigned_chars.add(target_char)
 
         explicit_move_attempt = bool(potential_inputs or extra_inputs)
         if not explicit_move_attempt and mentioned_chars:
@@ -2127,7 +2246,10 @@ def find_moves_in_text(text):
             char_data = FRAME_DATA[char]
 
             # Check against potential inputs found via regex
-            for inp in potential_inputs:
+            char_lookup_inputs = potential_inputs
+            if comparison_char_inputs.get(char):
+                char_lookup_inputs = comparison_char_inputs[char]
+            for inp in char_lookup_inputs:
                 row = lookup_frame_data(char, inp)
                 if row and row not in results:
                     results.append(row)
@@ -2396,8 +2518,116 @@ def find_moves_in_text(text):
                 if filtered_results:
                     results = filtered_results
 
+        if not query_has_explicit_strength and results and not target_combo_query:
+            existing_special_prompt_keys = set()
+            query_requests_air_context = bool(re.search(r"\b(?:air|aerial)\b", text_lower))
+
+            def variant_is_air_move(row):
+                move_name = str(row.get("moveName", "")).lower()
+                cmn_name = str(row.get("cmnName", "")).lower()
+                num_cmd = str(row.get("numCmd", "")).lower()
+                return (
+                    "(air" in num_cmd
+                    or "air" in move_name
+                    or "air" in cmn_name
+                    or "aerial" in move_name
+                    or "aerial" in cmn_name
+                )
+
+            for prompt_block in special_prompt_blocks:
+                char_match = re.search(r"Special Strength Options \(([^)]+)\)", prompt_block)
+                base_match = re.search(r"\n([^\n]+) variants:", prompt_block)
+                if not char_match or not base_match:
+                    continue
+                prompt_char = normalize_char_name(char_match.group(1))
+                prompt_base = str(base_match.group(1)).lower().strip()
+                if prompt_char and prompt_base:
+                    existing_special_prompt_keys.add((prompt_char, prompt_base))
+
+            ambiguous_special_keys = set()
+            for row in results:
+                row_char_norm = normalize_char_name(row.get("char_name", ""))
+                if not row_char_norm:
+                    continue
+                if mentioned_chars and row_char_norm not in {
+                    normalize_char_name(char) for char in mentioned_chars
+                }:
+                    continue
+                row_char_key = resolve_character_key(row.get("char_name", ""))
+                if not row_char_key:
+                    continue
+                if not is_special_motion_num_cmd(row.get("numCmd", "")):
+                    continue
+
+                base_name = get_special_canonical_base_name(row)
+                if not base_name:
+                    continue
+
+                key = (row_char_norm, base_name)
+                if key in existing_special_prompt_keys or key in ambiguous_special_keys:
+                    continue
+
+                variants = []
+                for candidate in FRAME_DATA.get(row_char_key, []):
+                    if not is_special_motion_num_cmd(candidate.get("numCmd", "")):
+                        continue
+                    if get_special_canonical_base_name(candidate) != base_name:
+                        continue
+                    if query_requires_denjin and not row_is_denjin_variant(candidate):
+                        continue
+                    variants.append(candidate)
+
+                if query_requests_air_context and not any(
+                    variant_is_air_move(candidate) for candidate in variants
+                ):
+                    continue
+
+                if len(variants) < 2:
+                    continue
+
+                variant_lines = "\n".join(
+                    f"- {candidate.get('moveName', '?')} ({candidate.get('numCmd', '?')})"
+                    for candidate in variants
+                )
+                special_prompt_blocks.append(
+                    f"**Special Strength Options ({row_char_key.capitalize()})**\n"
+                    f"{base_name.title()} variants:\n{variant_lines}\n"
+                    "Reply or make a new prompt with the exact strength+move."
+                )
+                ambiguous_special_keys.add(key)
+
+            if ambiguous_special_keys:
+                filtered_results = []
+                for row in results:
+                    row_char = normalize_char_name(row.get("char_name", ""))
+                    row_base = get_special_canonical_base_name(row)
+                    row_key = (row_char, row_base)
+                    if (
+                        is_special_motion_num_cmd(row.get("numCmd", ""))
+                        and row_key in ambiguous_special_keys
+                    ):
+                        continue
+                    filtered_results.append(row)
+                results = filtered_results
+
     if special_prompt_blocks and (not query_has_explicit_strength or (special_grab_query and not results)):
         results = []
+
+    if (
+        wants_comparison
+        and len(mentioned_chars) >= 2
+        and len(comparison_char_inputs) >= 2
+        and not special_prompt_blocks
+    ):
+        scoped_comparison_rows = []
+        for char in mentioned_chars:
+            scoped_inputs = comparison_char_inputs.get(char, [])
+            for scoped_input in scoped_inputs:
+                scoped_row = lookup_frame_data(char, scoped_input)
+                if scoped_row and scoped_row not in scoped_comparison_rows:
+                    scoped_comparison_rows.append(scoped_row)
+        if scoped_comparison_rows:
+            results = scoped_comparison_rows
 
     if target_combo_query:
         if tc_prompt_blocks and not tc_selected_combos:
@@ -2462,6 +2692,53 @@ def find_moves_in_text(text):
     # If we have a character but NO specific moves found (e.g. "Help me with Ryu"),
     # the LLM will try to give advice about buttons. We MUST provide the data for those likely buttons
     # to prevent hallucinations (like saying 5MK is special cancellable when it isn't).
+    viper_air_burnkick_query = bool(
+        "c.viper" in mentioned_chars
+        and re.search(
+            r"\b(?:air|aerial)\s+burn(?:ing)?\s*kicks?\b"
+            r"|\b(?:air|aerial)\s+burnkicks?\b"
+            r"|\bburn(?:ing)?\s*kicks?\s+(?:air|aerial)\b"
+            r"|\bburnkicks?\s+(?:air|aerial)\b"
+            r"|\bj\.?\s*236k\b"
+            r"|\b236k\s*(?:\(air\)|air|aerial)\b",
+            text_lower,
+        )
+    )
+    if viper_air_burnkick_query and query_has_explicit_strength and results:
+        preferred_air_input = "air burn kick"
+        if re.search(r"\b(?:od|ex|236kk)\b", text_lower):
+            preferred_air_input = "od air burn kick"
+        elif re.search(r"\b(?:h|heavy|hk|236hk)\b", text_lower):
+            preferred_air_input = "h air burn kick"
+        elif re.search(r"\b(?:m|medium|mk|236mk)\b", text_lower):
+            preferred_air_input = "m air burn kick"
+        elif re.search(r"\b(?:l|light|lk|236lk)\b", text_lower):
+            preferred_air_input = "l air burn kick"
+
+        preferred_air_row = lookup_frame_data("c.viper", preferred_air_input)
+        if preferred_air_row and preferred_air_row not in results:
+            results.insert(0, preferred_air_row)
+
+        filtered_results = []
+        for row in results:
+            move_name = str(row.get("moveName", "")).lower()
+            cmn_name = str(row.get("cmnName", "")).lower()
+            num_cmd = str(row.get("numCmd", "")).lower()
+            burnkick_row = "burn" in move_name or "burn" in cmn_name
+            if not burnkick_row:
+                filtered_results.append(row)
+                continue
+            if (
+                "(air" in num_cmd
+                or "air" in move_name
+                or "air" in cmn_name
+                or "aerial" in move_name
+                or "aerial" in cmn_name
+            ):
+                filtered_results.append(row)
+        if filtered_results:
+            results = filtered_results
+
     if (
         wants_frame_data
         and mentioned_chars
@@ -2598,6 +2875,7 @@ def find_moves_in_text(text):
         "hitconfirm_alias_query": hitconfirm_alias_query,
         "super_gain_alias_query": super_gain_alias_query,
         "range_alias_query": range_alias_query,
+        "wants_comparison": bool(wants_comparison),
         "property_only_query": property_only_query,
         "target_combo_query": target_combo_query,
         "missing_scrolls_query": missing_scrolls_query,
@@ -2983,7 +3261,6 @@ def lookup_frame_data(character, move_input):
             "l fireball": "lp air slasher",
             "m fireball": "mp air slasher",
             "h fireball": "hp air slasher",
-            # 28K Jackknife Maximum
             "28k": "jackknife maximum",
             "28lk": "lk jackknife maximum",
             "28mk": "mk jackknife maximum",
@@ -3324,6 +3601,46 @@ def lookup_frame_data(character, move_input):
             "light ass slam": "lk sumo smash",
             "medium ass slam": "mk sumo smash",
             "heavy ass slam": "hk sumo smash",
+            # 22P Neko Damashi
+            "22p": "neko damashi",
+            "22 p": "neko damashi",
+            "22lp": "neko damashi",
+            "22 lp": "neko damashi",
+            "22mp": "neko damashi",
+            "22 mp": "neko damashi",
+            "22hp": "neko damashi",
+            "22 hp": "neko damashi",
+            "22pp": "neko damashi",
+            "22 pp": "neko damashi",
+            "neko damashi": "neko damashi",
+            "clap": "neko damashi",
+            "claps": "neko damashi",
+            "l clap": "neko damashi",
+            "m clap": "neko damashi",
+            "h clap": "neko damashi",
+            "light clap": "neko damashi",
+            "medium clap": "neko damashi",
+            "heavy clap": "neko damashi",
+            # Oicho Throw
+            "oicho": "oicho throw",
+            "oicho throw": "oicho throw",
+            "command grab": "oicho throw",
+            "l oicho": "lk oicho throw",
+            "m oicho": "mk oicho throw",
+            "h oicho": "hk oicho throw",
+            "light oicho": "lk oicho throw",
+            "medium oicho": "mk oicho throw",
+            "heavy oicho": "hk oicho throw",
+            "od oicho": "od oicho throw",
+            "ex oicho": "od oicho throw",
+            "l oicho throw": "lk oicho throw",
+            "m oicho throw": "mk oicho throw",
+            "h oicho throw": "hk oicho throw",
+            "light oicho throw": "lk oicho throw",
+            "medium oicho throw": "mk oicho throw",
+            "heavy oicho throw": "hk oicho throw",
+            "od oicho throw": "od oicho throw",
+            "ex oicho throw": "od oicho throw",
         },
         "m.bison": {
             "46p": "psycho crusher",
@@ -3618,6 +3935,83 @@ def lookup_frame_data(character, move_input):
             "od serpent lash": "od serpent lash",
             "ex serpent lash": "od serpent lash",
         },
+        "c.viper": {
+            "236k": "burning kick",
+            "236 k": "burning kick",
+            "236lk": "lk burning kick",
+            "236 lk": "lk burning kick",
+            "236mk": "mk burning kick",
+            "236 mk": "mk burning kick",
+            "236hk": "hk burning kick",
+            "236 hk": "hk burning kick",
+            "236kk": "od burning kick",
+            "236 kk": "od burning kick",
+            "burn kick": "burning kick",
+            "burnkick": "burning kick",
+            "burn kicks": "burning kick",
+            "burnkicks": "burning kick",
+            "burning kick": "burning kick",
+            "burning kicks": "burning kick",
+            "l burn kick": "lk burning kick",
+            "m burn kick": "mk burning kick",
+            "h burn kick": "hk burning kick",
+            "l burnkick": "lk burning kick",
+            "m burnkick": "mk burning kick",
+            "h burnkick": "hk burning kick",
+            "light burn kick": "lk burning kick",
+            "medium burn kick": "mk burning kick",
+            "heavy burn kick": "hk burning kick",
+            "light burnkick": "lk burning kick",
+            "medium burnkick": "mk burning kick",
+            "heavy burnkick": "hk burning kick",
+            "od burn kick": "od burning kick",
+            "ex burn kick": "od burning kick",
+            "od burnkick": "od burning kick",
+            "ex burnkick": "od burning kick",
+            "air burn kick": "burning kick (air)",
+            "air burnkick": "burning kick (air)",
+            "air burn kicks": "burning kick (air)",
+            "air burnkicks": "burning kick (air)",
+            "air burning kick": "burning kick (air)",
+            "air burning kicks": "burning kick (air)",
+            "aerial burn kick": "burning kick (air)",
+            "aerial burnkick": "burning kick (air)",
+            "aerial burning kick": "burning kick (air)",
+            "burn kick air": "burning kick (air)",
+            "burnkick air": "burning kick (air)",
+            "236k air": "burning kick (air)",
+            "236 k air": "burning kick (air)",
+            "236lk air": "236lk (air)",
+            "236 lk air": "236lk (air)",
+            "236mk air": "236mk (air)",
+            "236 mk air": "236mk (air)",
+            "236hk air": "236hk (air)",
+            "236 hk air": "236hk (air)",
+            "236kk air": "236kk (air)",
+            "236 kk air": "236kk (air)",
+            "j236k": "burning kick (air)",
+            "j.236k": "burning kick (air)",
+            "j 236k": "burning kick (air)",
+            "j236kk": "236kk (air)",
+            "j.236kk": "236kk (air)",
+            "j 236kk": "236kk (air)",
+            "l air burn kick": "lk burning kick (air)",
+            "m air burn kick": "mk burning kick (air)",
+            "h air burn kick": "hk burning kick (air)",
+            "l air burnkick": "lk burning kick (air)",
+            "m air burnkick": "mk burning kick (air)",
+            "h air burnkick": "hk burning kick (air)",
+            "light air burn kick": "lk burning kick (air)",
+            "medium air burn kick": "mk burning kick (air)",
+            "heavy air burn kick": "hk burning kick (air)",
+            "light air burnkick": "lk burning kick (air)",
+            "medium air burnkick": "mk burning kick (air)",
+            "heavy air burnkick": "hk burning kick (air)",
+            "od air burn kick": "od burning kick (air)",
+            "ex air burn kick": "od burning kick (air)",
+            "od air burnkick": "od burning kick (air)",
+            "ex air burnkick": "od burning kick (air)",
+        },
     }
 
     COMMAND_JUMP_NORMAL_ALIASES = {
@@ -3797,6 +4191,7 @@ def extract_button_suffix(num_cmd_token):
 
 def normalize_move_name_for_gif_text(value):
     text = str(value or "").lower()
+    text = text.replace("aerial", "air")
     text = re.sub(r"\bdivekick\b", "dive kick", text)
     text = re.sub(r"\b6\s*h\s*p\s*\+\s*h\s*k\b", "drive reversal", text)
     text = re.sub(r"\b6hphk\b", "drive reversal", text)
@@ -3917,7 +4312,8 @@ def lookup_hitbox_gif_link(row):
     if not gif_rows:
         return None
 
-    row_num_cmd = normalize_num_cmd_token(row.get("numCmd", ""))
+    row_num_cmd_raw = str(row.get("numCmd", "")).lower()
+    row_num_cmd = normalize_num_cmd_token(row_num_cmd_raw)
     row_suffix = extract_button_suffix(row_num_cmd)
     row_move_name_norm = normalize_move_name_for_gif_text(row.get("moveName", ""))
     row_cmn_name_norm = normalize_move_name_for_gif_text(row.get("cmnName", ""))
@@ -3926,6 +4322,11 @@ def lookup_hitbox_gif_link(row):
     row_tokens.update(move_name_match_tokens(row.get("cmnName", ""), row.get("numCmd", "")))
     num_cmd_candidates = build_num_cmd_candidates_for_gif(row)
     row_is_jump = "jump" in row_tokens
+    row_is_air = bool(
+        "(air" in row_num_cmd_raw
+        or "air" in row_move_name_norm
+        or "air" in row_cmn_name_norm
+    )
 
     if (
         char_key == "akuma"
@@ -3967,11 +4368,13 @@ def lookup_hitbox_gif_link(row):
         if not move_link:
             continue
 
-        gif_num_cmd = normalize_num_cmd_token(gif_row.get("numCmd", ""))
+        gif_num_cmd_raw = str(gif_row.get("numCmd", "")).lower()
+        gif_num_cmd = normalize_num_cmd_token(gif_num_cmd_raw)
         gif_suffix = extract_button_suffix(gif_num_cmd)
         gif_name_norm = normalize_move_name_for_gif_text(gif_row.get("moveName", ""))
         gif_tokens = move_name_match_tokens(gif_row.get("moveName", ""), gif_row.get("numCmd", ""))
         gif_is_jump = "jump" in gif_tokens
+        gif_is_air = bool("(air" in gif_num_cmd_raw or "air" in gif_name_norm)
 
         score = 0
 
@@ -4005,6 +4408,11 @@ def lookup_hitbox_gif_link(row):
             score += 8
         else:
             score -= 8
+
+        if row_is_air == gif_is_air:
+            score += 22
+        else:
+            score -= 22
 
         if score > best_score:
             best_score = score
@@ -4231,6 +4639,7 @@ def collect_hitbox_gif_links_from_text(text, frame_rows=None, limit=3):
         normalized_tokens & {
             "drive", "impact", "rush", "reversal",
             "dash", "forward", "backward",
+            "air", "aerial",
             "stand", "standing", "crouch", "crouching", "idle",
         }
         or "hphk" in normalized_num_cmd
@@ -5286,6 +5695,17 @@ background_video_task_handle = None
 reminder_task_handle = None
 web_server_task = None
 LAST_DAILY_VIDEO_ID = {}
+SPECIAL_STRENGTH_PROMPT_MODE = {}
+SPECIAL_STRENGTH_PROMPT_MODE_MAX = 300
+
+
+def remember_special_strength_prompt_mode(message_id, mode):
+    if not message_id or not mode:
+        return
+    SPECIAL_STRENGTH_PROMPT_MODE[int(message_id)] = str(mode)
+    while len(SPECIAL_STRENGTH_PROMPT_MODE) > SPECIAL_STRENGTH_PROMPT_MODE_MAX:
+        oldest_key = next(iter(SPECIAL_STRENGTH_PROMPT_MODE))
+        SPECIAL_STRENGTH_PROMPT_MODE.pop(oldest_key, None)
 
 
 async def send_deleted_message_failsafe(channel):
@@ -5618,6 +6038,7 @@ async def on_message(message):
     # logic flags
     check_media = False
     replied_context = None  # store bub's original message if replying to bot
+    special_strength_reply_mode = None
     is_reply_to_bot = False
     
     
@@ -5637,6 +6058,7 @@ async def on_message(message):
     hitconfirm_alias_query = bool(fd_context_payload.get("hitconfirm_alias_query"))
     super_gain_alias_query = bool(fd_context_payload.get("super_gain_alias_query"))
     range_alias_query = bool(fd_context_payload.get("range_alias_query"))
+    wants_comparison = bool(fd_context_payload.get("wants_comparison"))
     property_only_query = bool(fd_context_payload.get("property_only_query"))
     target_combo_query = bool(fd_context_payload.get("target_combo_query"))
     missing_scrolls_query = bool(fd_context_payload.get("missing_scrolls_query"))
@@ -5683,25 +6105,90 @@ async def on_message(message):
         or ".framedata" in content_lower
     )
 
+    vague_move_query_without_output_intent = False
+    if (
+        client.user.mentioned_in(message)
+        and not message.reference
+        and not gif_query
+        and not explicit_frame_request
+        and not property_only_query
+        and not target_combo_query
+        and not startup_alias_query
+        and not hitconfirm_alias_query
+        and not super_gain_alias_query
+        and not range_alias_query
+        and not re.search(
+            r"\b(punish|punishable|compare|comparison|versus|vs|stats?|health|reversal|combo|bnb|oki|playstyle|overview|coach)\b",
+            content_lower,
+        )
+    ):
+        implied_frame_payload = find_moves_in_text(f"{content_lower} framedata")
+        implied_data = implied_frame_payload.get("data", "")
+        implied_rows = implied_frame_payload.get("rows", [])
+        implied_mode = implied_frame_payload.get("mode", "none")
+        implied_explicit_move_attempt = bool(implied_frame_payload.get("explicit_move_attempt"))
+        implied_has_special_prompt = "Special Strength Options" in implied_data
+        vague_move_query_without_output_intent = bool(
+            implied_explicit_move_attempt
+            and (
+                (implied_mode == "frame" and implied_rows)
+                or implied_has_special_prompt
+            )
+        )
+
     if should_handle_direct_frame:
-        if gif_query and client.user.mentioned_in(message) and (
-            fd_context_rows
-            or missing_scrolls_query
-            or ".gif" in content_lower
-            or ".hitbox" in content_lower
-        ):
+        if vague_move_query_without_output_intent:
+            await message.reply(
+                "I cannot read minds. Please specify whether you want a GIF, frame data, "
+                "or a specific value. For example: \"chun l sbk framedata\"."
+            )
+            return
+
+        if gif_query and client.user.mentioned_in(message):
+            if "Special Strength Options" in fd_context_data:
+                try:
+                    sent_prompt = await message.reply(fd_context_data)
+                    remember_special_strength_prompt_mode(sent_prompt.id, "gif")
+                except Exception as reply_error:
+                    if is_deleted_message_reference_error(reply_error):
+                        print("Special strength options gif reply target deleted. Triggering failsafe.", flush=True)
+                        await send_deleted_message_failsafe(message.channel)
+                    else:
+                        print(f"Special strength options gif reply error: {reply_error}", flush=True)
+                return
+
             if not explicit_move_attempt:
                 await message.reply("Tell me the exact move too, like 'aki 5hp gif'.")
                 return
 
+            gif_frame_rows = fd_context_rows
+            if wants_comparison and fd_context_rows:
+                comparison_rows = []
+                seen_comparison_chars = set()
+                for row in fd_context_rows:
+                    row_char = normalize_char_name(row.get("char_name", ""))
+                    if not row_char or row_char in seen_comparison_chars:
+                        continue
+                    seen_comparison_chars.add(row_char)
+                    comparison_rows.append(row)
+                if len(comparison_rows) >= 2:
+                    gif_frame_rows = comparison_rows
+
+            gif_limit = 3
+            if wants_comparison and gif_frame_rows:
+                gif_limit = max(2, min(6, len(gif_frame_rows)))
+
             gif_links = collect_hitbox_gif_links_from_text(
                 content_no_mentions,
-                frame_rows=fd_context_rows,
-                limit=3,
+                frame_rows=gif_frame_rows,
+                limit=gif_limit,
             )
             if gif_links:
                 try:
-                    await message.reply(gif_links[0])
+                    if wants_comparison and len(gif_links) > 1:
+                        await message.reply("\n".join(gif_links))
+                    else:
+                        await message.reply(gif_links[0])
                 except Exception as reply_error:
                     if is_deleted_message_reference_error(reply_error):
                         print("Hitbox gif reply target deleted. Triggering failsafe.", flush=True)
@@ -5751,7 +6238,11 @@ async def on_message(message):
             return
         if "Special Strength Options" in fd_context_data:
             try:
-                await message.reply(fd_context_data)
+                sent_prompt = await message.reply(fd_context_data)
+                remember_special_strength_prompt_mode(
+                    sent_prompt.id,
+                    "gif" if gif_query else "frame",
+                )
             except Exception as reply_error:
                 if is_deleted_message_reference_error(reply_error):
                     print("Special strength options reply target deleted. Triggering failsafe.", flush=True)
@@ -5933,6 +6424,32 @@ async def on_message(message):
                     replied_context = replied_msg.content  # capture only TC prompt
                 elif "Special Strength Options" in replied_msg.content:
                     replied_context = replied_msg.content
+                    special_strength_reply_mode = SPECIAL_STRENGTH_PROMPT_MODE.get(replied_msg.id)
+                    if (
+                        not special_strength_reply_mode
+                        and replied_msg.reference
+                        and replied_msg.reference.message_id
+                    ):
+                        try:
+                            if replied_msg.reference.cached_message:
+                                prompt_source_msg = replied_msg.reference.cached_message
+                            else:
+                                prompt_source_msg = await message.channel.fetch_message(
+                                    replied_msg.reference.message_id
+                                )
+                            prompt_source_text = strip_discord_mentions(
+                                prompt_source_msg.content or ""
+                            ).lower()
+                            if (
+                                re.search(r"\bgif(?:s)?\b", prompt_source_text)
+                                or re.search(r"\bhit\s*box(?:es)?\b", prompt_source_text)
+                                or re.search(r"\bhitbox(?:es)?\b", prompt_source_text)
+                                or ".gif" in prompt_source_text
+                                or ".hitbox" in prompt_source_text
+                            ):
+                                special_strength_reply_mode = "gif"
+                        except Exception:
+                            pass
 
         except discord.NotFound:
             pass
@@ -5977,17 +6494,51 @@ async def on_message(message):
         base_hint = base_match.group(1).strip().lower() if base_match else ""
 
         option_matches = []
-        raw_option_pairs = re.findall(r"([^()]+?)\s*\(([^)]+)\)", replied_context)
-        for raw_name, raw_cmd in raw_option_pairs:
-            option_name = raw_name.strip()
-            option_cmd = raw_cmd.strip()
-            option_name_lower = option_name.lower()
-            if option_name_lower.startswith("special strength options"):
+
+        def parse_special_option_line(option_line):
+            line = str(option_line or "").strip()
+            if not line:
+                return None, None
+            if "::" in line:
+                left, right = line.split("::", 1)
+                option_name = left.strip()
+                option_cmd = right.strip()
+                if option_name and option_cmd:
+                    return option_name, option_cmd
+                return None, None
+            if not line.endswith(")"):
+                return None, None
+
+            depth = 0
+            split_idx = None
+            for idx in range(len(line) - 1, -1, -1):
+                ch = line[idx]
+                if ch == ")":
+                    depth += 1
+                elif ch == "(":
+                    depth -= 1
+                    if depth == 0:
+                        split_idx = idx
+                        break
+
+            if split_idx is None:
+                return None, None
+
+            option_name = line[:split_idx].strip()
+            option_cmd = line[split_idx + 1 : -1].strip()
+            if option_name and option_cmd:
+                return option_name, option_cmd
+            return None, None
+
+        for raw_line in replied_context.splitlines():
+            line = raw_line.strip()
+            if not line.startswith(("-", "•", "·")):
                 continue
-            if "variants:" in option_name_lower:
-                option_name = option_name.split(":", 1)[1].strip()
-            option_name = re.sub(r"^[\s\-•·]+", "", option_name).strip()
-            if not option_name:
+            option_line = re.sub(r"^[\s\-•·]+", "", line).strip()
+            if not option_line:
+                continue
+            option_name, option_cmd = parse_special_option_line(option_line)
+            if not option_name or not option_cmd:
                 continue
             option_matches.append((option_name, option_cmd))
 
@@ -6014,6 +6565,7 @@ async def on_message(message):
         special_query = (content_no_mentions or "").strip()
         raw_special_reply_lower = special_query.lower()
         special_query_lower = raw_special_reply_lower
+        special_request_mode = "gif" if (special_strength_reply_mode == "gif" or gif_query) else "frame"
 
         selected_option_name = None
         selected_option_cmd = None
@@ -6063,11 +6615,39 @@ async def on_message(message):
                 for direct_value in (selected_option_cmd, selected_option_name):
                     if not direct_value:
                         continue
-                    direct_row = lookup_frame_data(resolved_char, direct_value)
+                    direct_row = None
+                    direct_value_norm = str(direct_value).lower().strip()
+                    for candidate_row in FRAME_DATA.get(resolved_char, []):
+                        candidate_num_cmd = str(candidate_row.get("numCmd", "")).lower().strip()
+                        if candidate_num_cmd == direct_value_norm:
+                            direct_row = candidate_row
+                            break
+                    if direct_row is None:
+                        direct_row = lookup_frame_data(resolved_char, direct_value)
                     if direct_row:
-                        await send_frame_table_response(message, [direct_row], format_frame_data(direct_row))
+                        if special_request_mode == "gif":
+                            gif_links = []
+                            direct_link = lookup_hitbox_gif_link(direct_row)
+                            if direct_link:
+                                gif_links.append(direct_link)
+                            else:
+                                gif_links = collect_hitbox_gif_links_from_text(
+                                    f"{char_hint} {direct_value} gif",
+                                    frame_rows=[direct_row],
+                                    limit=1,
+                                )
+                            if gif_links:
+                                await message.reply(gif_links[0])
+                            else:
+                                missing_gif_msg = (
+                                    "I have frame data for that move but no hitbox gif link yet. "
+                                    f"<@{SCROLLS_MAINTAINER_USER_ID}> {SCROLLS_FIX_REQUEST_TEXT}"
+                                )
+                                await message.reply(missing_gif_msg)
+                        else:
+                            await send_frame_table_response(message, [direct_row], format_frame_data(direct_row))
                         return
-            special_query = f"{char_hint} {selected_value} framedata".strip()
+            special_query = f"{char_hint} {selected_value}".strip()
             special_query_lower = special_query.lower()
 
         if char_hint:
@@ -6083,7 +6663,10 @@ async def on_message(message):
                 special_query = f"{special_query} {base_hint}".strip()
             special_query_lower = special_query.lower()
 
-        if not (
+        if special_request_mode == "gif":
+            if not re.search(r"\b(gif|gifs|hitbox|hitboxes)\b", special_query_lower):
+                special_query = f"{special_query} gif".strip()
+        elif not (
             "framedata" in special_query_lower
             or "frame data" in special_query_lower
             or re.search(r"\bframes?\b", special_query_lower)
@@ -6094,7 +6677,32 @@ async def on_message(message):
         special_data = special_payload.get("data", "")
         special_rows = special_payload.get("rows", [])
         if "Special Strength Options" in special_data:
-            await message.reply(special_data)
+            sent_prompt = await message.reply(special_data)
+            remember_special_strength_prompt_mode(
+                sent_prompt.id,
+                special_request_mode,
+            )
+            return
+        if special_request_mode == "gif" and special_rows:
+            gif_links = []
+            if len(special_rows) == 1:
+                direct_link = lookup_hitbox_gif_link(special_rows[0])
+                if direct_link:
+                    gif_links.append(direct_link)
+            if not gif_links:
+                gif_links = collect_hitbox_gif_links_from_text(
+                    special_query,
+                    frame_rows=special_rows,
+                    limit=1,
+                )
+            if gif_links:
+                await message.reply(gif_links[0])
+                return
+            missing_gif_msg = (
+                "I have frame data for that move but no hitbox gif link yet. "
+                f"<@{SCROLLS_MAINTAINER_USER_ID}> {SCROLLS_FIX_REQUEST_TEXT}"
+            )
+            await message.reply(missing_gif_msg)
             return
         if special_payload.get("mode") == "frame" and special_rows and special_data:
             await send_frame_table_response(message, special_rows, special_data)
