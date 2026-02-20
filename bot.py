@@ -187,7 +187,7 @@ SYSTEM_PROMPT = (
     "Do not end responses with a question unless necessary. Keep it casual and natural. "
     "Always speak the same language as the prompt. You are an English speaker by default unless prompted otherwise. "
     "Keep responses concise. For casual chat or banter, 2-3 sentences is enough. "
-    "When someone asks a genuine question — about frame data, fighting game concepts, coaching, or any topic — give a COMPLETE and USEFUL answer."
+    "When someone asks a genuine question about frame data, fighting game concepts, coaching, or any topic, give a COMPLETE and USEFUL answer."
     "Answer the user's question DIRECTLY first. Then, optionally, add one brief in-character remark. "
     "No tangents. Stay on topic. Keep responses concise and relevant. "
     "NEVER output your internal thought process. Do not use parentheses for meta-commentary. "
@@ -1009,8 +1009,10 @@ def format_sheet_text(df: pd.DataFrame) -> str:
 
 def load_frame_data():
     """Load frame data, stats, combos, oki, and character info from ODS."""
-    global FRAME_DATA, FRAME_STATS, BNB_DATA, OKI_DATA, CHARACTER_INFO, HITBOX_GIF_DATA, RANGE_DATA
+    global FRAME_DATA, FRAME_STATS, BNB_DATA, OKI_DATA, CHARACTER_INFO, HITBOX_GIF_DATA, RANGE_DATA, QUIZ_CHARACTER_TERMS_CACHE, QUIZ_MOVE_NAME_TERMS_CACHE
     filename = "FAT - SF6 Frame Data.ods"
+    QUIZ_CHARACTER_TERMS_CACHE = None
+    QUIZ_MOVE_NAME_TERMS_CACHE = None
     
     if os.path.exists(filename):
         try:
@@ -1420,6 +1422,12 @@ def find_moves_in_text(text):
         # that map to these characters.
 
         query_requires_denjin = "denjin" in text_tokens
+        query_requests_sa1 = bool(
+            re.search(r"\b(?:sa\s*1|super\s*art\s*1|super\s*1|level\s*1)\b", text_lower)
+        )
+        query_requests_sa2 = bool(
+            re.search(r"\b(?:sa\s*2|super\s*art\s*2|super\s*2|level\s*2)\b", text_lower)
+        )
 
         def row_is_denjin_variant(row):
             move_name = str(row.get("moveName", "")).lower()
@@ -1499,7 +1507,25 @@ def find_moves_in_text(text):
             "light", "medium", "heavy", "l", "m", "h",
             "od", "ex",
         }
-        query_has_explicit_strength = any(token in query_strength_tokens for token in text_tokens)
+        compact_strength_motion_present = bool(
+            re.search(
+                r"\b(?:lp|mp|hp|lk|mk|hk|light|medium|heavy|l|m|h)\s*(?:dp|srk|shoryu|shoryuken)\b"
+                r"|\b(?:dp|srk|shoryu|shoryuken)\s*(?:lp|mp|hp|lk|mk|hk|light|medium|heavy|l|m|h)\b",
+                text_lower,
+            )
+        )
+        compact_od_motion_present = bool(
+            re.search(
+                r"\b(?:od|ex)\s*(?:dp|srk|shoryu|shoryuken)\b"
+                r"|\b(?:dp|srk|shoryu|shoryuken)\s*(?:od|ex)\b",
+                text_lower,
+            )
+        )
+        query_has_explicit_strength = bool(
+            any(token in query_strength_tokens for token in text_tokens)
+            or compact_strength_motion_present
+            or compact_od_motion_present
+        )
         query_wants_od_strength = bool(re.search(r"\b(od|ex)\b", text_lower))
         query_wants_non_od_strength = bool(
             re.search(r"\b(lp|mp|hp|lk|mk|hk|light|medium|heavy|l|m|h)\b", text_lower)
@@ -1687,6 +1713,26 @@ def find_moves_in_text(text):
 
                 for base_name, variants in special_base_map.items():
                     prompt_variants = variants
+
+                    if char == "ryu" and base_name in {"super art level 1", "super art level 2"}:
+                        if base_name == "super art level 1" and not query_requests_sa1:
+                            continue
+                        if base_name == "super art level 2" and not query_requests_sa2:
+                            continue
+
+                        denjin_variants = [row for row in variants if row_is_denjin_variant(row)]
+                        non_denjin_variants = [row for row in variants if not row_is_denjin_variant(row)]
+                        if query_requires_denjin and denjin_variants:
+                            chosen_variant = denjin_variants[0]
+                            if chosen_variant not in results:
+                                results.append(chosen_variant)
+                            continue
+                        if not query_requires_denjin and non_denjin_variants:
+                            chosen_variant = non_denjin_variants[0]
+                            if chosen_variant not in results:
+                                results.append(chosen_variant)
+                            continue
+
                     if query_requires_denjin:
                         denjin_variants = [row for row in variants if row_is_denjin_variant(row)]
                         if denjin_variants:
@@ -1988,6 +2034,9 @@ def find_moves_in_text(text):
             "demon swoop",
             "demon gou zanku",
             "demon gou rasen",
+            "adamant flame",
+            "flaming fist",
+            "flame",
             "burn kick",
             "burnkick",
             "burn kicks",
@@ -2370,7 +2419,7 @@ def find_moves_in_text(text):
                     special_prompt_blocks.append(
                         f"**Special Strength Options ({char.capitalize()})**\n"
                         f"Command Grab variants:\n{variant_lines}\n"
-                        "Reply or make a new prompt with the exact strength+move."
+                        "Reply or make a new prompt with the exact command or move name."
                     )
 
         if query_requires_denjin and results:
@@ -2561,6 +2610,9 @@ def find_moves_in_text(text):
 
                 base_name = get_special_canonical_base_name(row)
                 if not base_name:
+                    continue
+
+                if row_char_norm == "ryu" and base_name in {"super art level 1", "super art level 2"}:
                     continue
 
                 key = (row_char_norm, base_name)
@@ -3162,13 +3214,6 @@ def lookup_frame_data(character, move_input):
         return re.sub(r"[^a-z0-9>]", "", normalized)
     
     INPUT_ALIASES = {
-        # Chun-Li
-        "4mp": "4 or 6mp",
-        "6mp": "4 or 6mp",
-        "f+mp": "4 or 6mp",
-        "b+mp": "4 or 6mp",
-        "fmp": "4 or 6mp",
-        "bmp": "4 or 6mp",
         # DP/SRK
         "dp": "623",
         "srk": "623",
@@ -3459,6 +3504,35 @@ def lookup_frame_data(character, move_input):
             "ex zanku": "od zanku hadoken",
             "od zanku hadoken": "od zanku hadoken",
             "ex zanku hadoken": "od zanku hadoken",
+            "214p": "adamant flame",
+            "214 p": "adamant flame",
+            "214lp": "lp adamant flame",
+            "214 lp": "lp adamant flame",
+            "214mp": "mp adamant flame",
+            "214 mp": "mp adamant flame",
+            "214hp": "hp adamant flame",
+            "214 hp": "hp adamant flame",
+            "214pp": "od adamant flame",
+            "214 pp": "od adamant flame",
+            "adamant flame": "adamant flame",
+            "flaming fist": "adamant flame",
+            "flame": "adamant flame",
+            "l flame": "lp adamant flame",
+            "m flame": "mp adamant flame",
+            "h flame": "hp adamant flame",
+            "light flame": "lp adamant flame",
+            "medium flame": "mp adamant flame",
+            "heavy flame": "hp adamant flame",
+            "od flame": "od adamant flame",
+            "ex flame": "od adamant flame",
+            "l adamant flame": "lp adamant flame",
+            "m adamant flame": "mp adamant flame",
+            "h adamant flame": "hp adamant flame",
+            "light adamant flame": "lp adamant flame",
+            "medium adamant flame": "mp adamant flame",
+            "heavy adamant flame": "hp adamant flame",
+            "od adamant flame": "od adamant flame",
+            "ex adamant flame": "od adamant flame",
             "demon raid": "demon raid",
             "od demon raid": "od demon raid",
             "ex demon raid": "od demon raid",
@@ -3750,6 +3824,12 @@ def lookup_frame_data(character, move_input):
             "h flash kick": "hk somersault kick",
         },
         "chun-li": {
+            "4mp": "4 or 6mp",
+            "6mp": "4 or 6mp",
+            "f+mp": "4 or 6mp",
+            "b+mp": "4 or 6mp",
+            "fmp": "4 or 6mp",
+            "bmp": "4 or 6mp",
             # 28K Spinning Bird Kick
             "28k": "spinning bird kick",
             "28lk": "lk spinning bird kick",
@@ -4327,6 +4407,13 @@ def lookup_hitbox_gif_link(row):
         or "air" in row_move_name_norm
         or "air" in row_cmn_name_norm
     )
+    row_is_denjin = bool(
+        "denjin" in row_move_name_norm
+        or "denjin" in row_cmn_name_norm
+        or "charged" in row_move_name_norm
+        or "charged" in row_cmn_name_norm
+        or "(charged" in row_num_cmd_raw
+    )
 
     if (
         char_key == "akuma"
@@ -4360,9 +4447,7 @@ def lookup_hitbox_gif_link(row):
             if "zanku hadoken" in gif_name_norm and "demon" not in gif_name_norm:
                 return move_link
 
-    best_score = -1
-    best_link = None
-
+    gif_candidates = []
     for gif_row in gif_rows:
         move_link = str(gif_row.get("moveLink", "")).strip()
         if not move_link:
@@ -4370,58 +4455,114 @@ def lookup_hitbox_gif_link(row):
 
         gif_num_cmd_raw = str(gif_row.get("numCmd", "")).lower()
         gif_num_cmd = normalize_num_cmd_token(gif_num_cmd_raw)
-        gif_suffix = extract_button_suffix(gif_num_cmd)
         gif_name_norm = normalize_move_name_for_gif_text(gif_row.get("moveName", ""))
         gif_tokens = move_name_match_tokens(gif_row.get("moveName", ""), gif_row.get("numCmd", ""))
-        gif_is_jump = "jump" in gif_tokens
-        gif_is_air = bool("(air" in gif_num_cmd_raw or "air" in gif_name_norm)
 
-        score = 0
+        gif_candidates.append(
+            {
+                "link": move_link,
+                "num_cmd": gif_num_cmd,
+                "suffix": extract_button_suffix(gif_num_cmd),
+                "name_norm": gif_name_norm,
+                "tokens": gif_tokens,
+                "is_jump": "jump" in gif_tokens,
+                "is_air": bool("(air" in gif_num_cmd_raw or "air" in gif_name_norm),
+                "is_denjin": bool(
+                    "denjin" in gif_name_norm
+                    or "charged" in gif_name_norm
+                    or "(charged" in gif_num_cmd_raw
+                ),
+            }
+        )
 
-        overlap = len(row_tokens & gif_tokens)
-        if overlap:
-            score += overlap * 12
-            score += int((overlap / max(len(row_tokens), 1)) * 10)
+    if not gif_candidates:
+        return None
 
-        if row_move_name_norm and gif_name_norm:
-            if row_move_name_norm == gif_name_norm:
-                score += 35
-            elif row_move_name_norm in gif_name_norm or gif_name_norm in row_move_name_norm:
-                score += 18
+    def apply_row_context_filters(items):
+        filtered = list(items)
 
-        if row_cmn_name_norm and gif_name_norm:
-            if row_cmn_name_norm == gif_name_norm:
-                score += 22
-            elif row_cmn_name_norm in gif_name_norm or gif_name_norm in row_cmn_name_norm:
-                score += 10
+        denjin_matches = [item for item in filtered if item["is_denjin"] == row_is_denjin]
+        if denjin_matches:
+            filtered = denjin_matches
 
-        if row_num_cmd and gif_num_cmd == row_num_cmd:
-            score += 28
+        air_matches = [item for item in filtered if item["is_air"] == row_is_air]
+        if air_matches:
+            filtered = air_matches
 
-        if gif_num_cmd and gif_num_cmd in num_cmd_candidates:
-            score += 18
+        jump_matches = [item for item in filtered if item["is_jump"] == row_is_jump]
+        if jump_matches:
+            filtered = jump_matches
 
-        if row_suffix and gif_suffix and row_suffix == gif_suffix:
-            score += 10
+        return filtered
 
-        if row_is_jump == gif_is_jump:
-            score += 8
-        else:
-            score -= 8
+    def pick_first_link(items):
+        if not items:
+            return None
+        filtered = apply_row_context_filters(items)
+        if row_suffix:
+            suffix_matches = [item for item in filtered if item["suffix"] == row_suffix]
+            if suffix_matches:
+                filtered = suffix_matches
+        return filtered[0]["link"] if filtered else None
 
-        if row_is_air == gif_is_air:
-            score += 22
-        else:
-            score -= 22
+    row_names = []
+    if row_move_name_norm:
+        row_names.append(row_move_name_norm)
+    if row_cmn_name_norm and row_cmn_name_norm not in row_names:
+        row_names.append(row_cmn_name_norm)
 
-        if score > best_score:
-            best_score = score
-            best_link = move_link
+    exact_num_cmd_matches = [
+        item for item in gif_candidates
+        if row_num_cmd and item["num_cmd"] == row_num_cmd
+    ]
+    link = pick_first_link(exact_num_cmd_matches)
+    if link:
+        return link
 
-    if best_link and best_score >= 20:
-        return best_link
+    num_cmd_candidate_matches = [
+        item for item in gif_candidates
+        if item["num_cmd"] and item["num_cmd"] in num_cmd_candidates
+    ]
+    link = pick_first_link(num_cmd_candidate_matches)
+    if link:
+        return link
 
-    return None
+    exact_name_matches = [
+        item for item in gif_candidates
+        if any(name and item["name_norm"] == name for name in row_names)
+    ]
+    link = pick_first_link(exact_name_matches)
+    if link:
+        return link
+
+    contains_name_matches = [
+        item for item in gif_candidates
+        if any(
+            name
+            and (
+                name in item["name_norm"]
+                or item["name_norm"] in name
+            )
+            for name in row_names
+        )
+    ]
+    link = pick_first_link(contains_name_matches)
+    if link:
+        return link
+
+    token_overlap_matches = [
+        item for item in gif_candidates
+        if row_tokens and (row_tokens & item["tokens"])
+    ]
+    link = pick_first_link(token_overlap_matches)
+    if link:
+        return link
+
+    fallback_candidates = apply_row_context_filters(gif_candidates)
+    if fallback_candidates:
+        return fallback_candidates[0]["link"]
+
+    return gif_candidates[0]["link"]
 
 
 def collect_hitbox_gif_links(rows, limit=3):
@@ -4526,104 +4667,152 @@ def lookup_hitbox_gif_links_from_query(char_key, move_query, limit=3):
     if query_num_cmd:
         query_tokens.add(query_num_cmd)
 
-    scored_links = []
+    gif_candidates = []
     for gif_row in gif_rows:
         move_link = str(gif_row.get("moveLink", "")).strip()
         if not move_link:
             continue
 
-        gif_num_cmd = normalize_num_cmd_token(gif_row.get("numCmd", ""))
+        gif_num_cmd_raw = str(gif_row.get("numCmd", "")).lower()
+        gif_num_cmd = normalize_num_cmd_token(gif_num_cmd_raw)
         gif_name_norm = normalize_move_name_for_gif_text(gif_row.get("moveName", ""))
         gif_tokens = move_name_match_tokens(gif_row.get("moveName", ""), gif_row.get("numCmd", ""))
         if gif_num_cmd:
             gif_tokens.add(gif_num_cmd)
 
-        score = 0
+        gif_candidates.append(
+            {
+                "link": move_link,
+                "num_cmd": gif_num_cmd,
+                "suffix": extract_button_suffix(gif_num_cmd),
+                "name_norm": gif_name_norm,
+                "tokens": gif_tokens,
+                "is_jump": "jump" in gif_tokens,
+                "is_air": bool("(air" in gif_num_cmd_raw or "air" in gif_name_norm),
+                "is_denjin": bool(
+                    "denjin" in gif_name_norm
+                    or "charged" in gif_name_norm
+                    or "(charged" in gif_num_cmd_raw
+                ),
+            }
+        )
 
-        if query_num_cmd and gif_num_cmd == query_num_cmd:
-            score += 80
-        elif query_num_cmd and len(query_num_cmd) >= 2 and query_num_cmd in gif_num_cmd:
-            score += 25
-
-        if query_num_cmd.endswith("hphk") and gif_num_cmd.endswith("hphk"):
-            score += 30
-        if query_num_cmd in {"hphk", "5hphk"}:
-            if gif_num_cmd.startswith("5"):
-                score += 20
-            if "impact" in gif_tokens:
-                score += 12
-            if "reversal" in gif_tokens:
-                score += 4
-        if query_num_cmd == "6hphk":
-            if gif_num_cmd.startswith("6"):
-                score += 22
-            if "reversal" in gif_tokens:
-                score += 12
-
-        if query_name_norm and gif_name_norm:
-            if query_name_norm == gif_name_norm:
-                score += 55
-            elif query_name_norm in gif_name_norm or gif_name_norm in query_name_norm:
-                score += 25
-
-        overlap = len(query_tokens & gif_tokens)
-        if overlap:
-            score += overlap * 12
-
-        if "dash" in query_tokens:
-            score += 20 if "dash" in gif_tokens else -8
-            if "forward" not in query_tokens and "backward" not in query_tokens:
-                if "forward" in gif_tokens and "dash" in gif_tokens:
-                    score += 10
-                if "backward" in gif_tokens and "dash" in gif_tokens:
-                    score += 6
-        if "forward" in query_tokens and "forward" in gif_tokens:
-            score += 12
-        if "backward" in query_tokens and "backward" in gif_tokens:
-            score += 12
-        if "drive" in query_tokens and "drive" in gif_tokens:
-            score += 12
-        if "rush" in query_tokens and "rush" in gif_tokens:
-            score += 12
-        if ("stand" in query_tokens or "standing" in query_tokens) and ("stand" in gif_tokens or "standing" in gif_tokens):
-            score += 20
-
-        if query_num_cmd == "66":
-            if "drive" in query_tokens or "rush" in query_tokens:
-                if "drive" in gif_tokens and "rush" in gif_tokens:
-                    score += 16
-            else:
-                if "forward" in gif_tokens and "dash" in gif_tokens:
-                    score += 22
-        if query_num_cmd == "44" and "backward" in gif_tokens and "dash" in gif_tokens:
-            score += 22
-        if query_num_cmd == "5" and ("stand" in gif_tokens or "standing" in gif_tokens):
-            score += 22
-
-        if score > 0:
-            scored_links.append((score, move_link))
-
-    if not scored_links:
+    if not gif_candidates:
         return []
 
-    scored_links.sort(key=lambda item: item[0], reverse=True)
-    top_score = scored_links[0][0]
-    if top_score < 20:
-        return []
+    query_suffix = extract_button_suffix(query_num_cmd)
+    query_wants_air = bool({"air", "aerial"} & query_tokens)
+    query_wants_jump = "jump" in query_tokens
+    query_wants_denjin = bool({"denjin", "charged"} & query_tokens)
 
-    resolved_links = []
-    seen = set()
-    for score, move_link in scored_links:
-        if score < max(top_score - 18, 20):
-            continue
-        if move_link in seen:
-            continue
-        seen.add(move_link)
-        resolved_links.append(move_link)
-        if len(resolved_links) >= limit:
-            break
+    def apply_query_context_filters(items):
+        filtered = list(items)
 
-    return resolved_links
+        token_context_filters = [
+            "dash",
+            "forward",
+            "backward",
+            "drive",
+            "rush",
+            "impact",
+            "reversal",
+            "stand",
+            "crouch",
+        ]
+        for token in token_context_filters:
+            if token in query_tokens:
+                token_matches = [item for item in filtered if token in item["tokens"]]
+                if token_matches:
+                    filtered = token_matches
+
+        if query_wants_air:
+            air_matches = [item for item in filtered if item["is_air"]]
+            if air_matches:
+                filtered = air_matches
+
+        if query_wants_jump:
+            jump_matches = [item for item in filtered if item["is_jump"]]
+            if jump_matches:
+                filtered = jump_matches
+
+        if query_wants_denjin:
+            denjin_matches = [item for item in filtered if item["is_denjin"]]
+            if denjin_matches:
+                filtered = denjin_matches
+
+        if query_suffix:
+            suffix_matches = [item for item in filtered if item["suffix"] == query_suffix]
+            if suffix_matches:
+                filtered = suffix_matches
+
+        return filtered
+
+    def unique_links(items):
+        resolved_links = []
+        seen = set()
+        for item in items:
+            move_link = item["link"]
+            if move_link in seen:
+                continue
+            seen.add(move_link)
+            resolved_links.append(move_link)
+            if len(resolved_links) >= limit:
+                break
+        return resolved_links
+
+    if query_num_cmd:
+        exact_num_cmd = [
+            item for item in gif_candidates
+            if item["num_cmd"] and item["num_cmd"] == query_num_cmd
+        ]
+        if exact_num_cmd:
+            links = unique_links(apply_query_context_filters(exact_num_cmd))
+            if links:
+                return links
+
+        partial_num_cmd = [
+            item for item in gif_candidates
+            if item["num_cmd"] and (
+                query_num_cmd in item["num_cmd"]
+                or item["num_cmd"] in query_num_cmd
+            )
+        ]
+        if partial_num_cmd:
+            links = unique_links(apply_query_context_filters(partial_num_cmd))
+            if links:
+                return links
+
+    exact_name_matches = [
+        item for item in gif_candidates
+        if query_name_norm and item["name_norm"] == query_name_norm
+    ]
+    if exact_name_matches:
+        links = unique_links(apply_query_context_filters(exact_name_matches))
+        if links:
+            return links
+
+    contains_name_matches = [
+        item for item in gif_candidates
+        if query_name_norm and (
+            query_name_norm in item["name_norm"]
+            or item["name_norm"] in query_name_norm
+        )
+    ]
+    if contains_name_matches:
+        links = unique_links(apply_query_context_filters(contains_name_matches))
+        if links:
+            return links
+
+    token_overlap_matches = [
+        item for item in gif_candidates
+        if query_tokens and (query_tokens & item["tokens"])
+    ]
+    if token_overlap_matches:
+        links = unique_links(apply_query_context_filters(token_overlap_matches))
+        if links:
+            return links
+
+    return []
 
 
 def collect_hitbox_gif_links_from_text(text, frame_rows=None, limit=3):
@@ -5698,6 +5887,661 @@ LAST_DAILY_VIDEO_ID = {}
 SPECIAL_STRENGTH_PROMPT_MODE = {}
 SPECIAL_STRENGTH_PROMPT_MODE_MAX = 300
 
+ACTIVE_QUIZZES = {}  # channel_id -> quiz_state; one active quiz per channel at a time
+QUIZ_PENDING_ANOTHER = {}  # channel_id -> {"created_at": utc_dt, "message_id": int|None}
+QUIZ_INTENT_RE = re.compile(
+    r"\bquiz\b|\bquizz|\bguess.*\bframe|\bframe.*\bguess|\btest\s+me\b",
+    re.IGNORECASE,
+)
+QUIZ_NAME_PREFIX_RE = re.compile(r"^\s*(?:hey\s+)?(?:korean\s+)?bub\b", re.IGNORECASE)
+QUIZ_ESCAPE_REQUEST_RE = re.compile(
+    r"\b(framedata|frame\s*data|gif|range|startup|damage|on\s+hit|on\s+block|combo|bnb|oki|coach|compare|comparison|vs|versus|punish|stats?|health|reversal|cfn|remind(?:er)?|time)\b",
+    re.IGNORECASE,
+)
+QUIZ_GUESS_AGAIN_RE = re.compile(
+    r"\b(guess\s+again|again|continue|keep\s+guessing|try\s+again)\b",
+    re.IGNORECASE,
+)
+QUIZ_REVEAL_END_RE = re.compile(
+    r"\b(answer|reveal|show|tell|what'?s\s+the\s+answer|whats\s+the\s+answer|end|stop|quit|cancel)\b",
+    re.IGNORECASE,
+)
+QUIZ_ANOTHER_YES_RE = re.compile(
+    r"\b(yes|yeah|yep|sure|ok|okay|another|again|continue|new\s+question)\b",
+    re.IGNORECASE,
+)
+QUIZ_ANOTHER_NO_RE = re.compile(
+    r"\b(no|nah|nope|not\s+now|later|done|stop|cancel)\b",
+    re.IGNORECASE,
+)
+QUIZ_PENDING_ANOTHER_TTL_SECONDS = 600
+QUIZ_INTRO_BUTTON_RE = re.compile(
+    r"\b(?:st|cr|j)\s*(?:lp|mp|hp|lk|mk|hk)\b|\b(?:standing|crouching|jumping)\s+(?:light|medium|heavy)\s+(?:punch|kick)\b|\b(?:[1-9]\d{0,2}(?:lp|mp|hp|lk|mk|hk))\b|\b(?:236|214|623|421|41236|63214|22|66|44)\b|\b(?:sa1|sa2|sa3|ca|level\s*[123])\b",
+    re.IGNORECASE,
+)
+QUIZ_INTRO_DATA_TERM_RE = re.compile(
+    r"\b(startup|active|recovery|on\s+hit|on\s+block|damage|range|guard|cancel|total|block\s+advantage|frame\s+advantage)\b",
+    re.IGNORECASE,
+)
+QUIZ_CHARACTER_TERMS_CACHE = None
+QUIZ_MOVE_NAME_TERMS_CACHE = None
+
+
+# ==================== QUIZ FEATURE ====================
+
+def _quiz_row_has_data(row):
+    """Return True if a frame data row has enough real values to make a useful question."""
+    numcmd = str(row.get("numCmd", "")).strip()
+    if not numcmd or numcmd.lower() in ("-", "nan", ""):
+        return False
+    for field in ("startup", "dmg"):
+        val = str(row.get(field, "")).strip()
+        if val and val.lower() not in ("-", "nan", "") and re.search(r"\d", val):
+            return True
+    return False
+
+
+def _safe_first_int(text):
+    """Parse the first integer from a frame data value string like '5', '3+5', '2(2)2'."""
+    m = re.search(r"\d+", str(text or ""))
+    return int(m.group()) if m else None
+
+
+def _compute_total_frames(row):
+    """Try to compute total frames = startup + active + recovery (first integers only)."""
+    s = _safe_first_int(row.get("startup", ""))
+    a = _safe_first_int(row.get("active", ""))
+    r = _safe_first_int(row.get("recovery", ""))
+    if s is not None and a is not None and r is not None:
+        return s + a + r
+    return None
+
+
+def _fmt_quiz_field(row, key):
+    """Return a display-ready string for a row field, or '-' if empty/missing."""
+    val = str(row.get(key, "")).strip()
+    if not val or val.lower() in ("nan", ""):
+        return "-"
+    return val
+
+
+def build_quiz_question_text(round_num, total_rounds, row):
+    """Build the quiz question message from a frame data row, hiding character and move name."""
+    startup   = _fmt_quiz_field(row, "startup")
+    active    = _fmt_quiz_field(row, "active")
+    recovery  = _fmt_quiz_field(row, "recovery")
+    total     = _compute_total_frames(row)
+    on_hit    = _fmt_quiz_field(row, "onHit")
+    on_block  = _fmt_quiz_field(row, "onBlock")
+    damage    = _fmt_quiz_field(row, "dmg")
+    guard     = _fmt_quiz_field(row, "atkLvl")
+    cancel    = clean_embed_value(row.get("xx", ""), default="-", strip_brackets=True) or "-"
+    atk_range = _fmt_quiz_field(row, "atkRange")
+    # Use existing is_missing_attack_range_value to suppress placeholder text
+    if is_missing_attack_range_value(atk_range):
+        atk_range = "-"
+
+    timing_parts = [
+        f"Startup: **{startup}**",
+        f"Active: **{active}**",
+        f"Recovery: **{recovery}**",
+    ]
+    if total is not None:
+        timing_parts.append(f"Total: **{total}**")
+
+    prop_parts = [
+        f"Damage: **{damage}**",
+        f"Guard: **{guard}**",
+        f"Cancel: **{cancel}**",
+    ]
+    if atk_range != "-":
+        prop_parts.append(f"Range: **{atk_range}**")
+
+    lines = [
+        "**FRAME DATA QUIZ**",
+        "Guess the character and the move.",
+        "",
+        " | ".join(timing_parts),
+        f"On Hit: **{on_hit}** | On Block: **{on_block}**",
+        " | ".join(prop_parts),
+        "",
+        "Answer by mention or reply with: `Character Move`",
+        "Example: `Ryu 5LP` or `Cammy spiral arrow`",
+    ]
+    return "\n".join(lines)
+
+
+def _sanitize_quiz_ascii_line(text):
+    """Normalize quiz LLM text to plain ASCII, single line, and no em dash."""
+    cleaned = str(text or "")
+    cleaned = cleaned.replace("\u2014", "-").replace("\u2013", "-")
+    cleaned = cleaned.replace("\r", " ").replace("\n", " ")
+    cleaned = cleaned.encode("ascii", "ignore").decode("ascii")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def _normalize_quiz_words(text):
+    return re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).strip()
+
+
+def _get_quiz_character_terms():
+    global QUIZ_CHARACTER_TERMS_CACHE
+    if QUIZ_CHARACTER_TERMS_CACHE is not None:
+        return QUIZ_CHARACTER_TERMS_CACHE
+
+    terms = set()
+    for name in FRAME_DATA.keys():
+        normalized = _normalize_quiz_words(name)
+        if normalized:
+            terms.add(normalized)
+
+    for name in CHARACTER_ALIASES.keys():
+        normalized = _normalize_quiz_words(name)
+        if normalized:
+            terms.add(normalized)
+
+    for name in CHARACTER_ALIASES.values():
+        normalized = _normalize_quiz_words(name)
+        if normalized:
+            terms.add(normalized)
+
+    QUIZ_CHARACTER_TERMS_CACHE = sorted(terms, key=len, reverse=True)
+    return QUIZ_CHARACTER_TERMS_CACHE
+
+
+def _get_quiz_move_name_terms():
+    global QUIZ_MOVE_NAME_TERMS_CACHE
+    if QUIZ_MOVE_NAME_TERMS_CACHE is not None:
+        return QUIZ_MOVE_NAME_TERMS_CACHE
+
+    terms = set()
+    for rows in FRAME_DATA.values():
+        for row in rows:
+            normalized = _normalize_quiz_words(row.get("moveName", ""))
+            if not normalized:
+                continue
+            words = normalized.split()
+            if len(words) >= 2 or len(normalized) >= 7:
+                terms.add(normalized)
+
+    QUIZ_MOVE_NAME_TERMS_CACHE = sorted(terms, key=len, reverse=True)
+    return QUIZ_MOVE_NAME_TERMS_CACHE
+
+
+def _quiz_intro_has_specific_answer_hint(text):
+    normalized = _normalize_quiz_words(text)
+    if not normalized:
+        return True
+
+    if re.search(r"\d", normalized):
+        return True
+    if QUIZ_INTRO_BUTTON_RE.search(normalized):
+        return True
+    if QUIZ_INTRO_DATA_TERM_RE.search(normalized):
+        return True
+
+    padded = f" {normalized} "
+    for term in _get_quiz_character_terms():
+        if f" {term} " in padded:
+            return True
+
+    for term in _get_quiz_move_name_terms():
+        if f" {term} " in padded:
+            return True
+    return False
+
+
+async def build_quiz_persona_intro(channel, round_num, total_rounds):
+    """Generate a short in-character quiz intro line via LLM, with safe fallback."""
+    fallback = "One quiz question is ready. Guess the character and move from the data."
+    if not LLM_ENABLED:
+        return fallback
+
+    try:
+        selected_figures_str = get_selected_figures_str(getattr(channel, "guild", None))
+        llm_messages = [
+            {
+                "role": "system",
+                "content": SYSTEM_PROMPT.format(selected_figures_str=selected_figures_str),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "Write one short in-character line introducing a Street Fighter 6 frame data quiz round. "
+                    "This quiz has one question only. "
+                    "Do not mention any specific character, move, input, frame value, or answer clue. "
+                    "Do not use numbers. "
+                    "One sentence only. Keep it concise. No emojis. No em dash. ASCII only."
+                ),
+            },
+        ]
+        intro = await get_llm_response(llm_messages)
+        intro = _sanitize_quiz_ascii_line(intro)
+        if _quiz_intro_has_specific_answer_hint(intro):
+            return fallback
+        return intro or fallback
+    except Exception as e:
+        print(f"[quiz] intro llm error: {e}", flush=True)
+        return fallback
+
+
+async def build_quiz_question_message(channel, round_num, total_rounds, row):
+    """Build the full quiz prompt with in-character intro plus deterministic frame data."""
+    intro = await build_quiz_persona_intro(channel, round_num, total_rounds)
+    details = build_quiz_question_text(round_num, total_rounds, row)
+    return f"{intro}\n\n{details}"
+
+
+async def build_quiz_decline_message(channel):
+    """Generate a short in-character reply when user declines another quiz question."""
+    fallback = "Understood. We can run another question whenever you want."
+    if not LLM_ENABLED:
+        return fallback
+
+    try:
+        selected_figures_str = get_selected_figures_str(getattr(channel, "guild", None))
+        llm_messages = [
+            {
+                "role": "system",
+                "content": SYSTEM_PROMPT.format(selected_figures_str=selected_figures_str),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "The user declined another frame data quiz question. "
+                    "Write one short in-character acknowledgement and end the flow. "
+                    "One sentence only. No emojis. No em dash. ASCII only."
+                ),
+            },
+        ]
+        reply_text = await get_llm_response(llm_messages)
+        reply_text = _sanitize_quiz_ascii_line(reply_text)
+        return reply_text or fallback
+    except Exception as e:
+        print(f"[quiz] decline llm error: {e}", flush=True)
+        return fallback
+
+
+def _normalize_quiz_numcmd(text):
+    normalized = str(text or "").strip().lower()
+    normalized = re.sub(r"\s+", "", normalized)
+    normalized = re.sub(r"\[\d+\]", "", normalized)
+    normalized = re.sub(r"\(\d+\)", "", normalized)
+    return normalized
+
+
+def _normalize_quiz_name(text):
+    return re.sub(r"[^a-z0-9]+", "", str(text or "").lower())
+
+
+def _extract_char_and_move_from_text(text):
+    """
+    Try to parse (char_key, move_text) from a user answer string.
+    Tries progressively longer word prefixes for the character name.
+    Returns (char_key, move_text) or (None, None).
+    """
+    words = text.strip().lower().split()
+    if not words:
+        return None, None
+    for prefix_len in range(min(3, len(words)), 0, -1):
+        char_candidate = " ".join(words[:prefix_len])
+        char_key = resolve_character_key(char_candidate)
+        if char_key:
+            move_text = " ".join(words[prefix_len:]).strip()
+            return char_key, move_text
+    return None, None
+
+
+def check_quiz_answer(quiz_state, text):
+    """
+    Return True if `text` is a correct answer to the active quiz round.
+    Checks character match, then uses lookup_frame_data to match the move.
+    """
+    correct_char = quiz_state["char_key"]
+    correct_numcmd = quiz_state["numcmd"]
+    if not correct_numcmd:
+        return False
+    correct_numcmd_norm = _normalize_quiz_numcmd(correct_numcmd)
+
+    char_key, move_text = _extract_char_and_move_from_text(text)
+    if not char_key or not move_text:
+        return False
+    if char_key != correct_char:
+        return False
+
+    row = lookup_frame_data(char_key, move_text)
+    if row is None:
+        return False
+
+    candidate = str(row.get("numCmd", "")).strip().lower()
+    if candidate == correct_numcmd:
+        return True
+
+    candidate_norm = _normalize_quiz_numcmd(candidate)
+    if candidate_norm and candidate_norm == correct_numcmd_norm:
+        return True
+
+    return False
+
+
+def _format_quiz_scores(scores):
+    """Format a {user_id: points} dict into a readable leaderboard string."""
+    if not scores:
+        return "No points scored."
+    sorted_scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    lines = ["**Scores:**"]
+    for i, (uid, pts) in enumerate(sorted_scores, 1):
+        lines.append(f"{i}. <@{uid}> - {pts} pt{'s' if pts != 1 else ''}")
+    return "\n".join(lines)
+
+
+def _quiz_unique_rows_for_char(char_key, asked=None):
+    """Return valid rows whose moveName is unique within the character sheet."""
+    asked = asked or set()
+    rows = FRAME_DATA.get(char_key, [])
+    if not rows:
+        return []
+
+    name_counts = {}
+    for row in rows:
+        if not _quiz_row_has_data(row):
+            continue
+        name_key = _normalize_quiz_name(row.get("moveName", ""))
+        if not name_key:
+            continue
+        name_counts[name_key] = name_counts.get(name_key, 0) + 1
+
+    unique_rows = []
+    for row in rows:
+        if not _quiz_row_has_data(row):
+            continue
+        numcmd = str(row.get("numCmd", "")).strip().lower()
+        if (char_key, numcmd) in asked:
+            continue
+        name_key = _normalize_quiz_name(row.get("moveName", ""))
+        if name_counts.get(name_key, 0) == 1:
+            unique_rows.append(row)
+
+    return unique_rows
+
+
+def pick_quiz_move(asked=None):
+    """
+    Pick a random (char_key, row) from FRAME_DATA suitable for a quiz question.
+    `asked` is an optional set of (char_key, numcmd) tuples already used this session.
+    """
+    asked = asked or set()
+    if not FRAME_DATA:
+        return None, None
+    char_keys = [k for k, rows in FRAME_DATA.items() if rows]
+    if not char_keys:
+        return None, None
+
+    # Try up to 30 random picks, prioritizing rows with unique move names.
+    for _ in range(30):
+        char_key = random.choice(char_keys)
+        rows = _quiz_unique_rows_for_char(char_key, asked=asked)
+        if rows:
+            return char_key, random.choice(rows)
+
+    # Fallback 1: unique move-name rows (ignore asked dedup)
+    random.shuffle(char_keys)
+    for char_key in char_keys:
+        rows = _quiz_unique_rows_for_char(char_key, asked=set())
+        if rows:
+            return char_key, random.choice(rows)
+
+    # Fallback 2: any valid row
+    random.shuffle(char_keys)
+    for char_key in char_keys:
+        rows = [r for r in FRAME_DATA[char_key] if _quiz_row_has_data(r)]
+        if rows:
+            return char_key, random.choice(rows)
+    return None, None
+
+
+async def start_quiz(message):
+    """Initialize and send one quiz question in the channel."""
+    channel_id = message.channel.id
+    if channel_id in ACTIVE_QUIZZES:
+        try:
+            await message.reply(
+                "A quiz is already running. Mention me and say `stop quiz` to end it."
+            )
+        except Exception as e:
+            print(f"[quiz] already-running reply error: {e}", flush=True)
+        return
+
+    char_key, row = pick_quiz_move()
+    if not char_key:
+        try:
+            await message.reply("No frame data is loaded. Cannot start a quiz.")
+        except Exception as e:
+            print(f"[quiz] no-data reply error: {e}", flush=True)
+        return
+
+    numcmd = str(row.get("numCmd", "")).strip().lower()
+    quiz_state = {
+        "channel_id": channel_id,
+        "total_rounds": 1,
+        "round": 1,
+        "scores": {},
+        "char_key": char_key,
+        "numcmd": numcmd,
+        "row": row,
+        "answered": False,
+        "awaiting_choice": False,
+        "asked": {(char_key, numcmd)},
+    }
+    ACTIVE_QUIZZES[channel_id] = quiz_state
+    QUIZ_PENDING_ANOTHER.pop(channel_id, None)
+
+    question_text = await build_quiz_question_message(message.channel, 1, 1, row)
+    try:
+        sent = await message.channel.send(question_text)
+        quiz_state["last_message_id"] = sent.id
+    except Exception as e:
+        print(f"[quiz] start send error: {e}", flush=True)
+        ACTIVE_QUIZZES.pop(channel_id, None)
+
+
+async def stop_quiz(message):
+    """Cancel the active quiz in the channel and reveal the current answer."""
+    channel_id = message.channel.id
+    quiz = ACTIVE_QUIZZES.pop(channel_id, None)
+    if not quiz:
+        try:
+            await message.reply("No quiz is running right now.")
+        except Exception as e:
+            print(f"[quiz] stop-no-quiz reply error: {e}", flush=True)
+        return
+
+    row = quiz["row"]
+    char_key = quiz["char_key"]
+    char_display = str(row.get("char_name", char_key.capitalize())).strip()
+    move_name = str(row.get("moveName", "?")).strip()
+    num_cmd = str(row.get("numCmd", "?")).strip()
+    reply_text = (
+        f"Quiz ended. The answer was **{char_display}'s {move_name} ({num_cmd})**.\n"
+        "Would you like another question?"
+    )
+    try:
+        sent = await message.reply(reply_text)
+        QUIZ_PENDING_ANOTHER[channel_id] = {
+            "created_at": datetime.datetime.now(datetime.timezone.utc),
+            "message_id": getattr(sent, "id", None),
+        }
+    except Exception as e:
+        if is_deleted_message_reference_error(e):
+            sent = await message.channel.send(reply_text)
+            QUIZ_PENDING_ANOTHER[channel_id] = {
+                "created_at": datetime.datetime.now(datetime.timezone.utc),
+                "message_id": getattr(sent, "id", None),
+            }
+        else:
+            print(f"[quiz] stop send error: {e}", flush=True)
+
+
+def _is_reply_to_quiz_msg(message):
+    """True if the message is a Discord reply to the bot's last quiz question."""
+    ref = getattr(message, "reference", None)
+    if not ref:
+        return False
+    channel_id = message.channel.id
+    quiz = ACTIVE_QUIZZES.get(channel_id)
+    if not quiz:
+        return False
+    last_id = quiz.get("last_message_id")
+    return last_id is not None and ref.message_id == last_id
+
+
+def _is_reply_to_quiz_followup_msg(message):
+    """True if message replies to the most recent 'another question' prompt."""
+    ref = getattr(message, "reference", None)
+    if not ref:
+        return False
+    pending = QUIZ_PENDING_ANOTHER.get(message.channel.id)
+    if not pending:
+        return False
+    pending_id = pending.get("message_id")
+    return pending_id is not None and ref.message_id == pending_id
+
+
+def _quiz_pending_another_active(channel_id):
+    pending = QUIZ_PENDING_ANOTHER.get(channel_id)
+    if not pending:
+        return False
+    created_at = pending.get("created_at")
+    if not created_at:
+        QUIZ_PENDING_ANOTHER.pop(channel_id, None)
+        return False
+    age = (datetime.datetime.now(datetime.timezone.utc) - created_at).total_seconds()
+    if age > QUIZ_PENDING_ANOTHER_TTL_SECONDS:
+        QUIZ_PENDING_ANOTHER.pop(channel_id, None)
+        return False
+    return True
+
+
+def _quiz_answer_display(quiz):
+    row = quiz["row"]
+    char_key = quiz["char_key"]
+    char_display = str(row.get("char_name", char_key.capitalize())).strip()
+    move_name = str(row.get("moveName", "?")).strip()
+    num_cmd = str(row.get("numCmd", "?")).strip()
+    return char_display, move_name, num_cmd
+
+
+async def handle_quiz_post_answer_choice(message):
+    """Handle follow-up choice after a wrong guess prompt."""
+    channel_id = message.channel.id
+    quiz = ACTIVE_QUIZZES.get(channel_id)
+    if not quiz or not quiz.get("awaiting_choice"):
+        return False
+
+    text = strip_discord_mentions(message.content or "").strip().lower()
+    if not text:
+        return False
+
+    if QUIZ_GUESS_AGAIN_RE.search(text):
+        quiz["awaiting_choice"] = False
+        try:
+            await message.reply("Guess again.")
+        except Exception as e:
+            if is_deleted_message_reference_error(e):
+                await message.channel.send("Guess again.")
+            else:
+                print(f"[quiz] guess-again reply error: {e}", flush=True)
+        return True
+
+    if QUIZ_REVEAL_END_RE.search(text):
+        ACTIVE_QUIZZES.pop(channel_id, None)
+        char_display, move_name, num_cmd = _quiz_answer_display(quiz)
+        reply_text = (
+            f"The answer was **{char_display}'s {move_name} ({num_cmd})**.\n"
+            "Would you like another question?"
+        )
+        try:
+            sent = await message.reply(reply_text)
+            QUIZ_PENDING_ANOTHER[channel_id] = {
+                "created_at": datetime.datetime.now(datetime.timezone.utc),
+                "message_id": getattr(sent, "id", None),
+            }
+        except Exception as e:
+            if is_deleted_message_reference_error(e):
+                sent = await message.channel.send(reply_text)
+                QUIZ_PENDING_ANOTHER[channel_id] = {
+                    "created_at": datetime.datetime.now(datetime.timezone.utc),
+                    "message_id": getattr(sent, "id", None),
+                }
+            else:
+                print(f"[quiz] reveal-end reply error: {e}", flush=True)
+        return True
+
+    return False
+
+
+async def handle_quiz_answer(message):
+    """
+    Process a message as a potential quiz answer.
+    Returns True if message was handled as a quiz answer attempt.
+    Returns False when message is not a usable answer format.
+    """
+    channel_id = message.channel.id
+    quiz = ACTIVE_QUIZZES.get(channel_id)
+    if not quiz or quiz.get("answered"):
+        return False
+
+    text = strip_discord_mentions(message.content or "").strip().lower()
+    if not text:
+        return False
+
+    parsed_char, parsed_move = _extract_char_and_move_from_text(text)
+    if not parsed_char or not parsed_move:
+        return False
+
+    if not check_quiz_answer(quiz, text):
+        quiz["awaiting_choice"] = True
+        try:
+            await message.reply(
+                "Not correct yet. Would you like the answer and end the quiz or guess again?"
+            )
+        except Exception as e:
+            if is_deleted_message_reference_error(e):
+                await message.channel.send(
+                    "Not correct yet. Would you like the answer and end the quiz or guess again?"
+                )
+            else:
+                print(f"[quiz] wrong-answer reply error: {e}", flush=True)
+        return True
+
+    ACTIVE_QUIZZES.pop(channel_id, None)
+    char_display, move_name, num_cmd = _quiz_answer_display(quiz)
+    result_text = (
+        f"Correct. The answer was **{char_display}'s {move_name} ({num_cmd})**.\n"
+        "Would you like another question?"
+    )
+    try:
+        sent = await message.reply(result_text)
+        QUIZ_PENDING_ANOTHER[channel_id] = {
+            "created_at": datetime.datetime.now(datetime.timezone.utc),
+            "message_id": getattr(sent, "id", None),
+        }
+    except Exception as e:
+        if is_deleted_message_reference_error(e):
+            sent = await message.channel.send(result_text)
+            QUIZ_PENDING_ANOTHER[channel_id] = {
+                "created_at": datetime.datetime.now(datetime.timezone.utc),
+                "message_id": getattr(sent, "id", None),
+            }
+        else:
+            print(f"[quiz] correct-reply error: {e}", flush=True)
+
+    return True
+
+
+# ==================== END QUIZ FEATURE ====================
+
 
 def remember_special_strength_prompt_mode(message_id, mode):
     if not message_id or not mode:
@@ -5894,9 +6738,71 @@ async def on_message(message):
     if await handle_cfn_command(message):
         return
 
-    
+    # Quiz flow
+    channel_id = message.channel.id
+    in_quiz = channel_id in ACTIVE_QUIZZES
+    quiz_state = ACTIVE_QUIZZES.get(channel_id)
+    answer_is_addressed = client.user.mentioned_in(message) or _is_reply_to_quiz_msg(message)
+    command_is_addressed = (
+        client.user.mentioned_in(message)
+        or bool(QUIZ_NAME_PREFIX_RE.search(content_lower))
+        or _is_reply_to_quiz_followup_msg(message)
+    )
 
-   
+    # Follow-up after ending a quiz
+    if not in_quiz and _quiz_pending_another_active(channel_id) and command_is_addressed:
+        if QUIZ_ANOTHER_YES_RE.search(content_lower) or QUIZ_INTENT_RE.search(content_lower):
+            QUIZ_PENDING_ANOTHER.pop(channel_id, None)
+            await start_quiz(message)
+            return
+        if QUIZ_ANOTHER_NO_RE.search(content_lower):
+            QUIZ_PENDING_ANOTHER.pop(channel_id, None)
+            decline_reply = await build_quiz_decline_message(message.channel)
+            try:
+                await message.reply(decline_reply)
+            except Exception as e:
+                if is_deleted_message_reference_error(e):
+                    await message.channel.send(decline_reply)
+                else:
+                    print(f"[quiz] another-question reply error: {e}", flush=True)
+            return
+
+    # Active quiz interactions (mention or reply required)
+    if in_quiz and answer_is_addressed:
+        if re.search(r'\b(stop|end|quit|cancel)\b', content_lower):
+            await stop_quiz(message)
+            return
+
+        if quiz_state and quiz_state.get("awaiting_choice"):
+            if (
+                QUIZ_ESCAPE_REQUEST_RE.search(content_lower)
+                and not QUIZ_GUESS_AGAIN_RE.search(content_lower)
+                and not QUIZ_REVEAL_END_RE.search(content_lower)
+            ):
+                ACTIVE_QUIZZES.pop(channel_id, None)
+                QUIZ_PENDING_ANOTHER.pop(channel_id, None)
+            if await handle_quiz_post_answer_choice(message):
+                return
+            if await handle_quiz_answer(message):
+                return
+            ACTIVE_QUIZZES.pop(channel_id, None)
+            QUIZ_PENDING_ANOTHER.pop(channel_id, None)
+        else:
+            if QUIZ_ESCAPE_REQUEST_RE.search(content_lower) and not QUIZ_INTENT_RE.search(content_lower):
+                ACTIVE_QUIZZES.pop(channel_id, None)
+                QUIZ_PENDING_ANOTHER.pop(channel_id, None)
+            elif not QUIZ_INTENT_RE.search(content_lower):
+                if await handle_quiz_answer(message):
+                    return
+
+    # Start or stop a single-question quiz
+    if command_is_addressed and QUIZ_INTENT_RE.search(content_lower):
+        if re.search(r'\b(stop|end|quit|cancel)\b', content_lower):
+            await stop_quiz(message)
+        else:
+            await start_quiz(message)
+        return
+
     if "tarkus" in content_lower:
         await message.reply("My brother is African American. Our love language is slurs and assaulting each other.")
         return
@@ -6139,7 +7045,7 @@ async def on_message(message):
     if should_handle_direct_frame:
         if vague_move_query_without_output_intent:
             await message.reply(
-                "I cannot read minds. Please specify whether you want a GIF, frame data, "
+                "While Yimbo is an awesome and handsome programmer, I cannot read minds. Please specify whether you want a GIF, frame data, "
                 "or a specific value. For example: \"chun l sbk framedata\"."
             )
             return
