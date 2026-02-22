@@ -1009,10 +1009,11 @@ def format_sheet_text(df: pd.DataFrame) -> str:
 
 def load_frame_data():
     """Load frame data, stats, combos, oki, and character info from ODS."""
-    global FRAME_DATA, FRAME_STATS, BNB_DATA, OKI_DATA, CHARACTER_INFO, HITBOX_GIF_DATA, RANGE_DATA, QUIZ_CHARACTER_TERMS_CACHE, QUIZ_MOVE_NAME_TERMS_CACHE
+    global FRAME_DATA, FRAME_STATS, BNB_DATA, OKI_DATA, CHARACTER_INFO, HITBOX_GIF_DATA, RANGE_DATA, QUIZ_CHARACTER_TERMS_CACHE, QUIZ_MOVE_NAME_TERMS_CACHE, QUIZ_CHARACTER_CENSOR_PATTERNS_CACHE
     filename = "FAT - SF6 Frame Data.ods"
     QUIZ_CHARACTER_TERMS_CACHE = None
     QUIZ_MOVE_NAME_TERMS_CACHE = None
+    QUIZ_CHARACTER_CENSOR_PATTERNS_CACHE = None
     
     if os.path.exists(filename):
         try:
@@ -1422,6 +1423,7 @@ def find_moves_in_text(text):
         # that map to these characters.
 
         query_requires_denjin = "denjin" in text_tokens
+        query_requires_charged = any(token in text_tokens for token in ("charged", "hold", "held"))
         query_requests_sa1 = bool(
             re.search(r"\b(?:sa\s*1|super\s*art\s*1|super\s*1|level\s*1)\b", text_lower)
         )
@@ -1439,6 +1441,19 @@ def find_moves_in_text(text):
                 or "charged" in move_name
                 or "charged" in cmn_name
                 or "(charged)" in num_cmd
+            )
+
+        def row_is_charged_variant(row):
+            move_name = str(row.get("moveName", "")).lower()
+            cmn_name = str(row.get("cmnName", "")).lower()
+            num_cmd = str(row.get("numCmd", "")).lower()
+            return (
+                "charged" in move_name
+                or "charged" in cmn_name
+                or "hold" in move_name
+                or "hold" in cmn_name
+                or "(charged" in num_cmd
+                or "(hold" in num_cmd
             )
 
         def row_is_od_variant(row):
@@ -1521,10 +1536,17 @@ def find_moves_in_text(text):
                 text_lower,
             )
         )
+        compact_num_cmd_strength_present = bool(
+            re.search(
+                r"\b(?:j\.?\s*)?[1-9][0-9]{1,5}\s*(?:\+)?\s*(?:lp|mp|hp|lk|mk|hk|pp|kk)\b",
+                text_lower,
+            )
+        )
         query_has_explicit_strength = bool(
             any(token in query_strength_tokens for token in text_tokens)
             or compact_strength_motion_present
             or compact_od_motion_present
+            or compact_num_cmd_strength_present
         )
         query_wants_od_strength = bool(re.search(r"\b(od|ex)\b", text_lower))
         query_wants_non_od_strength = bool(
@@ -1645,6 +1667,22 @@ def find_moves_in_text(text):
                 (r"\bwhip\b", "whip"),
             ]
             for pattern, alias_token in aki_whip_aliases:
+                if re.search(pattern, text_lower):
+                    if alias_token not in extra_inputs:
+                        extra_inputs.append(alias_token)
+                    break
+
+        if "luke" in mentioned_chars:
+            luke_knuckle_aliases = [
+                (r"\b(?:charged|hold|held)\s+(?:l|light|lp)\s+(?:flash\s+)?knuckle\b", "charged light knuckle"),
+                (r"\b(?:l|light|lp)\s+(?:charged|hold|held)\s+(?:flash\s+)?knuckle\b", "charged light knuckle"),
+                (r"\b(?:charged|hold|held)\s+(?:m|medium|mp)\s+(?:flash\s+)?knuckle\b", "charged medium knuckle"),
+                (r"\b(?:m|medium|mp)\s+(?:charged|hold|held)\s+(?:flash\s+)?knuckle\b", "charged medium knuckle"),
+                (r"\b(?:charged|hold|held)\s+(?:h|heavy|hp)\s+(?:flash\s+)?knuckle\b", "charged heavy knuckle"),
+                (r"\b(?:h|heavy|hp)\s+(?:charged|hold|held)\s+(?:flash\s+)?knuckle\b", "charged heavy knuckle"),
+                (r"\b(?:charged|hold|held)\s+(?:flash\s+)?knuckle\b", "charged knuckle"),
+            ]
+            for pattern, alias_token in luke_knuckle_aliases:
                 if re.search(pattern, text_lower):
                     if alias_token not in extra_inputs:
                         extra_inputs.append(alias_token)
@@ -2426,6 +2464,11 @@ def find_moves_in_text(text):
             denjin_results = [row for row in results if row_is_denjin_variant(row)]
             results = denjin_results
 
+        if query_requires_charged and results:
+            charged_results = [row for row in results if row_is_charged_variant(row)]
+            if charged_results:
+                results = charged_results
+
         if query_has_explicit_strength and results:
             wants_od_strength = bool(re.search(r"\b(od|ex)\b", text_lower))
             wants_non_od_strength = bool(
@@ -2636,6 +2679,15 @@ def find_moves_in_text(text):
 
                 if len(variants) < 2:
                     continue
+
+                if len(variants) == 2:
+                    od_variants = [candidate for candidate in variants if row_is_od_variant(candidate)]
+                    non_od_variants = [candidate for candidate in variants if not row_is_od_variant(candidate)]
+                    if len(od_variants) == 1 and len(non_od_variants) == 1:
+                        chosen_variant = od_variants[0] if query_wants_od_strength else non_od_variants[0]
+                        if chosen_variant not in results:
+                            results.append(chosen_variant)
+                        continue
 
                 variant_lines = "\n".join(
                     f"- {candidate.get('moveName', '?')} ({candidate.get('numCmd', '?')})"
@@ -3417,6 +3469,40 @@ def lookup_frame_data(character, move_input):
             "run dragonlash": "run > dragonlash",
             "run dragon lash": "run > dragonlash",
             "run lash": "run > dragonlash",
+        },
+        "luke": {
+            "214p": "flash knuckle",
+            "214 p": "flash knuckle",
+            "214lp": "lp flash knuckle",
+            "214 lp": "lp flash knuckle",
+            "214mp": "mp flash knuckle",
+            "214 mp": "mp flash knuckle",
+            "214hp": "hp flash knuckle",
+            "214 hp": "hp flash knuckle",
+            "214pp": "od flash knuckle",
+            "214 pp": "od flash knuckle",
+            "flash knuckle": "flash knuckle",
+            "knuckle": "flash knuckle",
+            "l knuckle": "lp flash knuckle",
+            "m knuckle": "mp flash knuckle",
+            "h knuckle": "hp flash knuckle",
+            "light knuckle": "lp flash knuckle",
+            "medium knuckle": "mp flash knuckle",
+            "heavy knuckle": "hp flash knuckle",
+            "od knuckle": "od flash knuckle",
+            "ex knuckle": "od flash knuckle",
+            "charged knuckle": "lp flash knuckle (hold)",
+            "hold knuckle": "lp flash knuckle (hold)",
+            "held knuckle": "lp flash knuckle (hold)",
+            "charged light knuckle": "lp flash knuckle (hold)",
+            "light charged knuckle": "lp flash knuckle (hold)",
+            "charged medium knuckle": "mp flash knuckle (hold)",
+            "medium charged knuckle": "mp flash knuckle (hold)",
+            "charged heavy knuckle": "hp flash knuckle (hold)",
+            "heavy charged knuckle": "hp flash knuckle (hold)",
+            "charged flash knuckle": "lp flash knuckle (hold)",
+            "hold flash knuckle": "lp flash knuckle (hold)",
+            "held flash knuckle": "lp flash knuckle (hold)",
         },
         "juri": {
             "dive kick": "shiku-sen",
@@ -4412,7 +4498,10 @@ def lookup_hitbox_gif_link(row):
         or "denjin" in row_cmn_name_norm
         or "charged" in row_move_name_norm
         or "charged" in row_cmn_name_norm
+        or "hold" in row_move_name_norm
+        or "hold" in row_cmn_name_norm
         or "(charged" in row_num_cmd_raw
+        or "(hold" in row_num_cmd_raw
     )
 
     if (
@@ -4470,7 +4559,9 @@ def lookup_hitbox_gif_link(row):
                 "is_denjin": bool(
                     "denjin" in gif_name_norm
                     or "charged" in gif_name_norm
+                    or "hold" in gif_name_norm
                     or "(charged" in gif_num_cmd_raw
+                    or "(hold" in gif_num_cmd_raw
                 ),
             }
         )
@@ -4692,7 +4783,9 @@ def lookup_hitbox_gif_links_from_query(char_key, move_query, limit=3):
                 "is_denjin": bool(
                     "denjin" in gif_name_norm
                     or "charged" in gif_name_norm
+                    or "hold" in gif_name_norm
                     or "(charged" in gif_num_cmd_raw
+                    or "(hold" in gif_num_cmd_raw
                 ),
             }
         )
@@ -4703,7 +4796,7 @@ def lookup_hitbox_gif_links_from_query(char_key, move_query, limit=3):
     query_suffix = extract_button_suffix(query_num_cmd)
     query_wants_air = bool({"air", "aerial"} & query_tokens)
     query_wants_jump = "jump" in query_tokens
-    query_wants_denjin = bool({"denjin", "charged"} & query_tokens)
+    query_wants_denjin = bool({"denjin", "charged", "hold", "held"} & query_tokens)
 
     def apply_query_context_filters(items):
         filtered = list(items)
@@ -4818,6 +4911,7 @@ def lookup_hitbox_gif_links_from_query(char_key, move_query, limit=3):
 def collect_hitbox_gif_links_from_text(text, frame_rows=None, limit=3):
     links = []
     seen = set()
+    has_frame_rows = bool(frame_rows)
 
     text_lower = strip_discord_mentions(text).lower()
     normalized_query = normalize_move_name_for_gif_text(text_lower)
@@ -4880,6 +4974,12 @@ def collect_hitbox_gif_links_from_text(text, frame_rows=None, limit=3):
                 if len(links) >= limit:
                     return True
         return False
+
+    if has_frame_rows:
+        if add_frame_row_links():
+            return links
+        add_query_links()
+        return links
 
     if query_prefers_text_match:
         if add_query_links():
@@ -5889,13 +5989,14 @@ SPECIAL_STRENGTH_PROMPT_MODE_MAX = 300
 
 ACTIVE_QUIZZES = {}  # channel_id -> quiz_state; one active quiz per channel at a time
 QUIZ_PENDING_ANOTHER = {}  # channel_id -> {"created_at": utc_dt, "message_id": int|None}
+QUIZ_PENDING_MODE = {}  # channel_id -> {"created_at": utc_dt, "message_id": int|None}
 QUIZ_INTENT_RE = re.compile(
     r"\bquiz\b|\bquizz|\bguess.*\bframe|\bframe.*\bguess|\btest\s+me\b",
     re.IGNORECASE,
 )
 QUIZ_NAME_PREFIX_RE = re.compile(r"^\s*(?:hey\s+)?(?:korean\s+)?bub\b", re.IGNORECASE)
 QUIZ_ESCAPE_REQUEST_RE = re.compile(
-    r"\b(framedata|frame\s*data|gif|range|startup|damage|on\s+hit|on\s+block|combo|bnb|oki|coach|compare|comparison|vs|versus|punish|stats?|health|reversal|cfn|remind(?:er)?|time)\b",
+    r"\b(framedata|frame\s*data|gif|range|startup|damage|on\s+hit|on\s+block|bnb|oki|coach|compare|comparison|vs|versus|punish|stats?|health|reversal|cfn|remind(?:er)?|time)\b",
     re.IGNORECASE,
 )
 QUIZ_GUESS_AGAIN_RE = re.compile(
@@ -5903,7 +6004,7 @@ QUIZ_GUESS_AGAIN_RE = re.compile(
     re.IGNORECASE,
 )
 QUIZ_REVEAL_END_RE = re.compile(
-    r"\b(answer|reveal|show|tell|what'?s\s+the\s+answer|whats\s+the\s+answer|end|stop|quit|cancel)\b",
+    r"\b(answer|reveal|show|tell|what'?s\s+the\s+answer|whats\s+the\s+answer|give\s+up|forfeit|forefeit|forfiet|surrender|concede|you\s+win|i\s+lose|end|stop|quit|cancel)\b",
     re.IGNORECASE,
 )
 QUIZ_ANOTHER_YES_RE = re.compile(
@@ -5914,7 +6015,17 @@ QUIZ_ANOTHER_NO_RE = re.compile(
     r"\b(no|nah|nope|not\s+now|later|done|stop|cancel)\b",
     re.IGNORECASE,
 )
+QUIZ_FORFEIT_RE = re.compile(
+    r"\b(give\s+up|forfeit|forefeit|forfiet|surrender|concede|you\s+win|i\s+lose)\b",
+    re.IGNORECASE,
+)
+QUIZ_CHEAT_LOOKUP_RE = re.compile(
+    r"\b(framedata|frame\s*data|gif|gifs|hit\s*box(?:es)?|hitbox(?:es)?)\b",
+    re.IGNORECASE,
+)
+QUIZ_MODE_RE = re.compile(r"\b(easy|medium|hard)\b", re.IGNORECASE)
 QUIZ_PENDING_ANOTHER_TTL_SECONDS = 600
+QUIZ_PENDING_MODE_TTL_SECONDS = 600
 QUIZ_INTRO_BUTTON_RE = re.compile(
     r"\b(?:st|cr|j)\s*(?:lp|mp|hp|lk|mk|hk)\b|\b(?:standing|crouching|jumping)\s+(?:light|medium|heavy)\s+(?:punch|kick)\b|\b(?:[1-9]\d{0,2}(?:lp|mp|hp|lk|mk|hk))\b|\b(?:236|214|623|421|41236|63214|22|66|44)\b|\b(?:sa1|sa2|sa3|ca|level\s*[123])\b",
     re.IGNORECASE,
@@ -5925,6 +6036,8 @@ QUIZ_INTRO_DATA_TERM_RE = re.compile(
 )
 QUIZ_CHARACTER_TERMS_CACHE = None
 QUIZ_MOVE_NAME_TERMS_CACHE = None
+QUIZ_CHARACTER_CENSOR_PATTERNS_CACHE = None
+QUIZ_VALID_MODES = {"easy", "medium", "hard"}
 
 
 # ==================== QUIZ FEATURE ====================
@@ -5939,6 +6052,33 @@ def _quiz_row_has_data(row):
         if val and val.lower() not in ("-", "nan", "") and re.search(r"\d", val):
             return True
     return False
+
+
+def _quiz_normalize_mode(mode, default="hard"):
+    mode_text = str(mode or "").strip().lower()
+    if mode_text in QUIZ_VALID_MODES:
+        return mode_text
+    return default
+
+
+def _quiz_extract_mode_from_text(text):
+    match = QUIZ_MODE_RE.search(str(text or "").lower())
+    if not match:
+        return None
+    return match.group(1).lower()
+
+
+def _quiz_row_allowed_for_mode(row, mode):
+    mode_key = _quiz_normalize_mode(mode)
+    move_type = str(row.get("moveType", "")).strip().lower()
+
+    if mode_key == "easy":
+        return move_type == "normal"
+
+    if mode_key == "medium":
+        return move_type in {"normal", "special", "command-grab", "movement-special"}
+
+    return True
 
 
 def _safe_first_int(text):
@@ -5965,8 +6105,10 @@ def _fmt_quiz_field(row, key):
     return val
 
 
-def build_quiz_question_text(round_num, total_rounds, row):
+def build_quiz_question_text(round_num, total_rounds, row, mode="hard"):
     """Build the quiz question message from a frame data row, hiding character and move name."""
+    mode_key = _quiz_normalize_mode(mode)
+    mode_label = mode_key.capitalize()
     startup   = _fmt_quiz_field(row, "startup")
     active    = _fmt_quiz_field(row, "active")
     recovery  = _fmt_quiz_field(row, "recovery")
@@ -5998,7 +6140,7 @@ def build_quiz_question_text(round_num, total_rounds, row):
         prop_parts.append(f"Range: **{atk_range}**")
 
     lines = [
-        "**FRAME DATA QUIZ**",
+        f"**FRAME DATA QUIZ ({mode_label})**",
         "Guess the character and the move.",
         "",
         " | ".join(timing_parts),
@@ -6009,6 +6151,22 @@ def build_quiz_question_text(round_num, total_rounds, row):
         "Example: `Ryu 5LP` or `Cammy spiral arrow`",
     ]
     return "\n".join(lines)
+
+
+def build_quiz_frame_embed(row, mode="hard"):
+    """Build a quiz embed using the standard frame table format without answer identity."""
+    mode_key = _quiz_normalize_mode(mode)
+    mode_label = mode_key.capitalize()
+    embed = build_frame_embed(row)
+    embed.title = truncate_embed_value(f"FRAME DATA QUIZ ({mode_label})", 256)
+    embed.description = None
+
+    footer_text = getattr(getattr(embed, "footer", None), "text", "")
+    if footer_text:
+        censored_footer = _quiz_censor_character_names(footer_text)
+        embed.set_footer(text=truncate_embed_value(censored_footer, 2048))
+
+    return embed
 
 
 def _sanitize_quiz_ascii_line(text):
@@ -6048,6 +6206,43 @@ def _get_quiz_character_terms():
 
     QUIZ_CHARACTER_TERMS_CACHE = sorted(terms, key=len, reverse=True)
     return QUIZ_CHARACTER_TERMS_CACHE
+
+
+def _get_quiz_character_censor_patterns():
+    global QUIZ_CHARACTER_CENSOR_PATTERNS_CACHE
+    if QUIZ_CHARACTER_CENSOR_PATTERNS_CACHE is not None:
+        return QUIZ_CHARACTER_CENSOR_PATTERNS_CACHE
+
+    patterns = []
+    seen_patterns = set()
+    for term in _get_quiz_character_terms():
+        words = [word for word in str(term or "").split() if word]
+        if not words:
+            continue
+        pattern_text = r"\b" + r"\W*".join(re.escape(word) for word in words) + r"\b"
+        if pattern_text in seen_patterns:
+            continue
+        seen_patterns.add(pattern_text)
+        patterns.append(re.compile(pattern_text, re.IGNORECASE))
+
+    QUIZ_CHARACTER_CENSOR_PATTERNS_CACHE = patterns
+    return QUIZ_CHARACTER_CENSOR_PATTERNS_CACHE
+
+
+def _quiz_censor_character_names(text):
+    raw_text = str(text or "")
+    if not raw_text:
+        return raw_text
+
+    def mask_match(match):
+        matched = match.group(0)
+        alnum_count = len(re.sub(r"[^A-Za-z0-9]", "", matched))
+        return "*" * max(1, alnum_count)
+
+    censored = raw_text
+    for pattern in _get_quiz_character_censor_patterns():
+        censored = pattern.sub(mask_match, censored)
+    return censored
 
 
 def _get_quiz_move_name_terms():
@@ -6092,9 +6287,10 @@ def _quiz_intro_has_specific_answer_hint(text):
     return False
 
 
-async def build_quiz_persona_intro(channel, round_num, total_rounds):
+async def build_quiz_persona_intro(channel, round_num, total_rounds, mode="hard"):
     """Generate a short in-character quiz intro line via LLM, with safe fallback."""
-    fallback = "One quiz question is ready. Guess the character and move from the data."
+    mode_key = _quiz_normalize_mode(mode)
+    fallback = f"One {mode_key} quiz question is ready. Guess the character and move from the data."
     if not LLM_ENABLED:
         return fallback
 
@@ -6110,6 +6306,7 @@ async def build_quiz_persona_intro(channel, round_num, total_rounds):
                 "content": (
                     "Write one short in-character line introducing a Street Fighter 6 frame data quiz round. "
                     "This quiz has one question only. "
+                    f"Difficulty mode is {mode_key}. "
                     "Do not mention any specific character, move, input, frame value, or answer clue. "
                     "Do not use numbers. "
                     "One sentence only. Keep it concise. No emojis. No em dash. ASCII only."
@@ -6126,11 +6323,13 @@ async def build_quiz_persona_intro(channel, round_num, total_rounds):
         return fallback
 
 
-async def build_quiz_question_message(channel, round_num, total_rounds, row):
-    """Build the full quiz prompt with in-character intro plus deterministic frame data."""
-    intro = await build_quiz_persona_intro(channel, round_num, total_rounds)
-    details = build_quiz_question_text(round_num, total_rounds, row)
-    return f"{intro}\n\n{details}"
+async def build_quiz_question_message(channel, round_num, total_rounds, row, mode="hard"):
+    """Build quiz prompt text + embed using the standard frame table layout."""
+    intro = await build_quiz_persona_intro(channel, round_num, total_rounds, mode=mode)
+    intro = _quiz_censor_character_names(intro)
+    quiz_embed = build_quiz_frame_embed(row, mode=mode)
+    prompt_text = f"{intro}\nAnswer by mention or reply with: `Character Move`"
+    return prompt_text, quiz_embed
 
 
 async def build_quiz_decline_message(channel):
@@ -6161,6 +6360,152 @@ async def build_quiz_decline_message(channel):
     except Exception as e:
         print(f"[quiz] decline llm error: {e}", flush=True)
         return fallback
+
+
+async def build_quiz_wrong_guess_message(channel):
+    """Generate an in-character wrong-answer acknowledgement without revealing clues."""
+    fallback = "Incorrect. Stay sharp and try again."
+    if not LLM_ENABLED:
+        return fallback
+
+    try:
+        selected_figures_str = get_selected_figures_str(getattr(channel, "guild", None))
+        llm_messages = [
+            {
+                "role": "system",
+                "content": SYSTEM_PROMPT.format(selected_figures_str=selected_figures_str),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "The user guessed wrong in a frame data quiz. "
+                    "Write one short in-character acknowledgement that they are not correct yet. "
+                    "Do not reveal the answer or any clues. "
+                    "Do not mention any specific character, move, input, button, or frame value. "
+                    "One sentence only. No emojis. No em dash. ASCII only."
+                ),
+            },
+        ]
+        reply_text = await get_llm_response(llm_messages)
+        reply_text = _sanitize_quiz_ascii_line(reply_text)
+        if _quiz_intro_has_specific_answer_hint(reply_text):
+            llm_messages[-1]["content"] = (
+                "Rewrite in one sentence as an in-character wrong-answer acknowledgement. "
+                "No character names, move names, inputs, buttons, numbers, or frame terms. "
+                "No emojis. No em dash. ASCII only."
+            )
+            reply_text = await get_llm_response(llm_messages)
+            reply_text = _sanitize_quiz_ascii_line(reply_text)
+            if _quiz_intro_has_specific_answer_hint(reply_text):
+                return fallback
+        return reply_text or fallback
+    except Exception as e:
+        print(f"[quiz] wrong-guess llm error: {e}", flush=True)
+        return fallback
+
+
+async def build_quiz_cheating_warning_message(channel):
+    """Generate an in-character warning for frame/gif lookup attempts during quiz mode."""
+    fallback = "Aiya, caught cheating: no framedata or gif scouting mid-quiz, so drop the scrolls and answer like a warrior."
+    if not LLM_ENABLED:
+        return fallback
+
+    try:
+        selected_figures_str = get_selected_figures_str(getattr(channel, "guild", None))
+        llm_messages = [
+            {
+                "role": "system",
+                "content": SYSTEM_PROMPT.format(selected_figures_str=selected_figures_str),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "The user tried to request frame data or a gif while a quiz is active. "
+                    "Write one short in-character anti-cheat warning that is playful, sharp, and a little aggressive. "
+                    "Call out the cheating attempt and tell them to answer the quiz directly from memory. "
+                    "Do not reveal any answer clues. "
+                    "No slurs. No hate speech. "
+                    "One sentence only. No emojis. No em dash. ASCII only."
+                ),
+            },
+        ]
+        reply_text = await get_llm_response(llm_messages)
+        reply_text = _sanitize_quiz_ascii_line(reply_text)
+        if _quiz_intro_has_specific_answer_hint(reply_text):
+            return fallback
+        return reply_text or fallback
+    except Exception as e:
+        print(f"[quiz] cheating-warning llm error: {e}", flush=True)
+        return fallback
+
+
+async def build_quiz_correct_guess_message(channel):
+    """Generate an in-character correct-answer acknowledgement."""
+    fallback = "Yes, that is correct."
+    if not LLM_ENABLED:
+        return fallback
+
+    try:
+        selected_figures_str = get_selected_figures_str(getattr(channel, "guild", None))
+        llm_messages = [
+            {
+                "role": "system",
+                "content": SYSTEM_PROMPT.format(selected_figures_str=selected_figures_str),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "The user guessed correctly in a frame data quiz. "
+                    "Write one short in-character acknowledgement that the guess is correct. "
+                    "One sentence only. No emojis. No em dash. ASCII only."
+                ),
+            },
+        ]
+        reply_text = await get_llm_response(llm_messages)
+        reply_text = _sanitize_quiz_ascii_line(reply_text)
+        return reply_text or fallback
+    except Exception as e:
+        print(f"[quiz] correct-guess llm error: {e}", flush=True)
+        return fallback
+
+
+async def classify_quiz_post_answer_choice_intent(channel, user_text):
+    """Classify post-wrong-answer choice intent as reveal, guess_again, or none."""
+    text = str(user_text or "").strip()
+    if not text or not LLM_ENABLED:
+        return None
+
+    try:
+        selected_figures_str = get_selected_figures_str(getattr(channel, "guild", None))
+        llm_messages = [
+            {
+                "role": "system",
+                "content": SYSTEM_PROMPT.format(selected_figures_str=selected_figures_str),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "Classify the user's message in a quiz flow after they were told: "
+                    "'Try again or give up and find out the answer'. "
+                    "Return exactly one token: REVEAL, GUESS, or NONE. "
+                    "REVEAL means they want to forfeit/reveal/end this question "
+                    "(e.g., give up, i surrender, you win, reveal answer). "
+                    "GUESS means they want to continue guessing. "
+                    "NONE means unrelated/unclear. "
+                    f"Message: {text}"
+                ),
+            },
+        ]
+        reply_text = await get_llm_response(llm_messages)
+        reply_upper = str(reply_text or "").upper()
+        if "REVEAL" in reply_upper:
+            return "reveal"
+        if "GUESS" in reply_upper:
+            return "guess_again"
+        return None
+    except Exception as e:
+        print(f"[quiz] post-answer intent llm error: {e}", flush=True)
+        return None
 
 
 def _normalize_quiz_numcmd(text):
@@ -6210,34 +6555,114 @@ def check_quiz_answer(quiz_state, text):
     if char_key != correct_char:
         return False
 
-    row = lookup_frame_data(char_key, move_text)
-    if row is None:
-        return False
+    candidate_rows = []
 
-    candidate = str(row.get("numCmd", "")).strip().lower()
-    if candidate == correct_numcmd:
-        return True
+    direct_row = lookup_frame_data(char_key, move_text)
+    if direct_row is not None:
+        candidate_rows.append(direct_row)
 
-    candidate_norm = _normalize_quiz_numcmd(candidate)
-    if candidate_norm and candidate_norm == correct_numcmd_norm:
-        return True
+    if re.search(r"\b(tc|target\s+combo|targetcombo)\b", move_text):
+        parser_query = f"{char_key} {move_text}".strip().lower()
+        parser_payload = find_moves_in_text(parser_query)
+        parsed_rows = parser_payload.get("rows", [])
+        for parsed_row in parsed_rows:
+            row_char = resolve_character_key(str(parsed_row.get("char_name", "")))
+            if row_char != char_key:
+                continue
+            if parsed_row not in candidate_rows:
+                candidate_rows.append(parsed_row)
+
+    for row in candidate_rows:
+        candidate = str(row.get("numCmd", "")).strip().lower()
+        if candidate == correct_numcmd:
+            return True
+
+        candidate_norm = _normalize_quiz_numcmd(candidate)
+        if candidate_norm and candidate_norm == correct_numcmd_norm:
+            return True
 
     return False
 
 
-def _format_quiz_scores(scores):
-    """Format a {user_id: points} dict into a readable leaderboard string."""
+def _quiz_clean_display_name(name):
+    cleaned = re.sub(r"\s+", " ", str(name or "")).strip()
+    return cleaned or "Unknown"
+
+
+def _quiz_user_display_name(user):
+    return _quiz_clean_display_name(
+        getattr(user, "display_name", None) or getattr(user, "name", None)
+    )
+
+
+def _quiz_score_line(name, points):
+    safe_name = _quiz_clean_display_name(name)
+    try:
+        safe_points = int(points)
+    except Exception:
+        safe_points = 0
+    return f"{safe_name}- {safe_points}"
+
+
+def _format_quiz_scores(scores, score_names=None):
+    """Format leaderboard lines as `username- points` sorted by highest points."""
     if not scores:
         return "No points scored."
-    sorted_scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-    lines = ["**Scores:**"]
-    for i, (uid, pts) in enumerate(sorted_scores, 1):
-        lines.append(f"{i}. <@{uid}> - {pts} pt{'s' if pts != 1 else ''}")
+
+    score_names = score_names or {}
+
+    def sort_key(item):
+        uid, pts = item
+        try:
+            point_value = int(pts)
+        except Exception:
+            point_value = 0
+        display = _quiz_clean_display_name(score_names.get(uid, f"User {uid}"))
+        return (-point_value, display.lower())
+
+    lines = []
+    for uid, pts in sorted(scores.items(), key=sort_key):
+        display = _quiz_clean_display_name(score_names.get(uid, f"User {uid}"))
+        lines.append(_quiz_score_line(display, pts))
     return "\n".join(lines)
 
 
-def _quiz_unique_rows_for_char(char_key, asked=None):
-    """Return valid rows whose moveName is unique within the character sheet."""
+def _quiz_build_crown_line(scores, score_names=None):
+    """Build an in-character crown line for the highest scorer(s)."""
+    if not scores:
+        return "No one scored this session, so the crown remains unclaimed."
+
+    score_names = score_names or {}
+    normalized_points = {}
+    for uid, pts in scores.items():
+        try:
+            normalized_points[uid] = int(pts)
+        except Exception:
+            normalized_points[uid] = 0
+
+    top_points = max(normalized_points.values())
+    winners = [uid for uid, pts in normalized_points.items() if pts == top_points]
+    winner_names = [
+        _quiz_clean_display_name(score_names.get(uid, f"User {uid}"))
+        for uid in winners
+    ]
+
+    if len(winner_names) == 1:
+        return (
+            f"By decree of Bub, {winner_names[0]} takes the crown with "
+            f"{top_points} point{'s' if top_points != 1 else ''}."
+        )
+
+    joined_winners = ", ".join(winner_names)
+    return (
+        f"By decree of Bub, the crown is shared by {joined_winners} at "
+        f"{top_points} point{'s' if top_points != 1 else ''} each."
+    )
+
+
+def _quiz_unique_rows_for_char(char_key, asked=None, mode="hard"):
+    """Return mode-filtered rows whose moveName is unique within the character sheet."""
+    mode_key = _quiz_normalize_mode(mode)
     asked = asked or set()
     rows = FRAME_DATA.get(char_key, [])
     if not rows:
@@ -6247,6 +6672,8 @@ def _quiz_unique_rows_for_char(char_key, asked=None):
     for row in rows:
         if not _quiz_row_has_data(row):
             continue
+        if not _quiz_row_allowed_for_mode(row, mode_key):
+            continue
         name_key = _normalize_quiz_name(row.get("moveName", ""))
         if not name_key:
             continue
@@ -6255,6 +6682,8 @@ def _quiz_unique_rows_for_char(char_key, asked=None):
     unique_rows = []
     for row in rows:
         if not _quiz_row_has_data(row):
+            continue
+        if not _quiz_row_allowed_for_mode(row, mode_key):
             continue
         numcmd = str(row.get("numCmd", "")).strip().lower()
         if (char_key, numcmd) in asked:
@@ -6266,11 +6695,12 @@ def _quiz_unique_rows_for_char(char_key, asked=None):
     return unique_rows
 
 
-def pick_quiz_move(asked=None):
+def pick_quiz_move(asked=None, mode="hard"):
     """
     Pick a random (char_key, row) from FRAME_DATA suitable for a quiz question.
     `asked` is an optional set of (char_key, numcmd) tuples already used this session.
     """
+    mode_key = _quiz_normalize_mode(mode)
     asked = asked or set()
     if not FRAME_DATA:
         return None, None
@@ -6281,28 +6711,41 @@ def pick_quiz_move(asked=None):
     # Try up to 30 random picks, prioritizing rows with unique move names.
     for _ in range(30):
         char_key = random.choice(char_keys)
-        rows = _quiz_unique_rows_for_char(char_key, asked=asked)
+        rows = _quiz_unique_rows_for_char(char_key, asked=asked, mode=mode_key)
         if rows:
             return char_key, random.choice(rows)
 
     # Fallback 1: unique move-name rows (ignore asked dedup)
     random.shuffle(char_keys)
     for char_key in char_keys:
-        rows = _quiz_unique_rows_for_char(char_key, asked=set())
+        rows = _quiz_unique_rows_for_char(char_key, asked=set(), mode=mode_key)
         if rows:
             return char_key, random.choice(rows)
 
     # Fallback 2: any valid row
     random.shuffle(char_keys)
     for char_key in char_keys:
-        rows = [r for r in FRAME_DATA[char_key] if _quiz_row_has_data(r)]
+        rows = [
+            r
+            for r in FRAME_DATA[char_key]
+            if _quiz_row_has_data(r) and _quiz_row_allowed_for_mode(r, mode_key)
+        ]
         if rows:
             return char_key, random.choice(rows)
     return None, None
 
 
-async def start_quiz(message):
+async def start_quiz(
+    message,
+    mode="hard",
+    session_scores=None,
+    session_score_names=None,
+    session_round=1,
+    session_owner_user_id=None,
+    session_message_ids=None,
+):
     """Initialize and send one quiz question in the channel."""
+    mode_key = _quiz_normalize_mode(mode)
     channel_id = message.channel.id
     if channel_id in ACTIVE_QUIZZES:
         try:
@@ -6313,37 +6756,136 @@ async def start_quiz(message):
             print(f"[quiz] already-running reply error: {e}", flush=True)
         return
 
-    char_key, row = pick_quiz_move()
+    char_key, row = pick_quiz_move(mode=mode_key)
     if not char_key:
         try:
-            await message.reply("No frame data is loaded. Cannot start a quiz.")
+            await message.reply(f"No frame data is available for {mode_key} mode.")
         except Exception as e:
             print(f"[quiz] no-data reply error: {e}", flush=True)
         return
 
+    normalized_scores = {}
+    if isinstance(session_scores, dict):
+        for raw_uid, raw_points in session_scores.items():
+            try:
+                uid = int(raw_uid)
+                pts = int(raw_points)
+            except Exception:
+                continue
+            if pts < 0:
+                continue
+            normalized_scores[uid] = pts
+
+    normalized_score_names = {}
+    if isinstance(session_score_names, dict):
+        for raw_uid, raw_name in session_score_names.items():
+            try:
+                uid = int(raw_uid)
+            except Exception:
+                continue
+            normalized_score_names[uid] = _quiz_clean_display_name(raw_name)
+
+    for uid in normalized_scores.keys():
+        if uid not in normalized_score_names:
+            normalized_score_names[uid] = _quiz_clean_display_name(f"User {uid}")
+
+    try:
+        round_num = max(1, int(session_round))
+    except Exception:
+        round_num = 1
+
+    try:
+        owner_user_id = int(session_owner_user_id)
+    except Exception:
+        owner_user_id = int(message.author.id)
+
+    normalized_message_ids = _quiz_normalize_message_ids(session_message_ids)
+
     numcmd = str(row.get("numCmd", "")).strip().lower()
     quiz_state = {
         "channel_id": channel_id,
+        "owner_user_id": owner_user_id,
         "total_rounds": 1,
-        "round": 1,
-        "scores": {},
+        "round": round_num,
+        "scores": normalized_scores,
+        "score_names": normalized_score_names,
         "char_key": char_key,
         "numcmd": numcmd,
         "row": row,
+        "mode": mode_key,
         "answered": False,
         "awaiting_choice": False,
         "asked": {(char_key, numcmd)},
+        "message_ids": normalized_message_ids,
     }
     ACTIVE_QUIZZES[channel_id] = quiz_state
     QUIZ_PENDING_ANOTHER.pop(channel_id, None)
+    QUIZ_PENDING_MODE.pop(channel_id, None)
 
-    question_text = await build_quiz_question_message(message.channel, 1, 1, row)
+    question_text, question_embed = await build_quiz_question_message(
+        message.channel,
+        round_num,
+        1,
+        row,
+        mode=mode_key,
+    )
     try:
-        sent = await message.channel.send(question_text)
-        quiz_state["last_message_id"] = sent.id
+        sent = await message.channel.send(question_text, embed=question_embed)
+        _quiz_track_message_id(quiz_state, getattr(sent, "id", None))
     except Exception as e:
         print(f"[quiz] start send error: {e}", flush=True)
         ACTIVE_QUIZZES.pop(channel_id, None)
+
+
+async def prompt_quiz_mode_selection(
+    message,
+    session_mode=None,
+    session_scores=None,
+    session_score_names=None,
+    session_round=1,
+    session_owner_user_id=None,
+    session_message_ids=None,
+):
+    """Prompt user to specify quiz difficulty and track pending mode selection."""
+    channel_id = message.channel.id
+    prompt_text = (
+        "Specify quiz difficulty: `easy`, `medium`, or `hard`. "
+        "Easy = normals only. Medium = normals + specials. Hard = everything."
+    )
+
+    stored_mode = str(session_mode or "").strip().lower()
+    if stored_mode not in QUIZ_VALID_MODES:
+        stored_mode = None
+
+    try:
+        owner_user_id = int(session_owner_user_id)
+    except Exception:
+        owner_user_id = int(message.author.id)
+
+    normalized_message_ids = _quiz_normalize_message_ids(session_message_ids)
+
+    pending_payload = {
+        "created_at": datetime.datetime.now(datetime.timezone.utc),
+        "message_id": None,
+        "owner_user_id": owner_user_id,
+        "mode": stored_mode,
+        "scores": dict(session_scores or {}),
+        "score_names": dict(session_score_names or {}),
+        "round": session_round,
+        "message_ids": normalized_message_ids,
+    }
+
+    try:
+        sent = await message.reply(prompt_text)
+        pending_payload["message_id"] = getattr(sent, "id", None)
+        QUIZ_PENDING_MODE[channel_id] = pending_payload
+    except Exception as e:
+        if is_deleted_message_reference_error(e):
+            sent = await message.channel.send(prompt_text)
+            pending_payload["message_id"] = getattr(sent, "id", None)
+            QUIZ_PENDING_MODE[channel_id] = pending_payload
+        else:
+            print(f"[quiz] mode-prompt send error: {e}", flush=True)
 
 
 async def stop_quiz(message):
@@ -6371,6 +6913,12 @@ async def stop_quiz(message):
         QUIZ_PENDING_ANOTHER[channel_id] = {
             "created_at": datetime.datetime.now(datetime.timezone.utc),
             "message_id": getattr(sent, "id", None),
+            "mode": quiz.get("mode", "hard"),
+            "owner_user_id": quiz.get("owner_user_id"),
+            "scores": dict(quiz.get("scores") or {}),
+            "score_names": dict(quiz.get("score_names") or {}),
+            "round": quiz.get("round", 1),
+            "message_ids": _quiz_build_message_history(quiz, getattr(sent, "id", None)),
         }
     except Exception as e:
         if is_deleted_message_reference_error(e):
@@ -6378,13 +6926,19 @@ async def stop_quiz(message):
             QUIZ_PENDING_ANOTHER[channel_id] = {
                 "created_at": datetime.datetime.now(datetime.timezone.utc),
                 "message_id": getattr(sent, "id", None),
+                "mode": quiz.get("mode", "hard"),
+                "owner_user_id": quiz.get("owner_user_id"),
+                "scores": dict(quiz.get("scores") or {}),
+                "score_names": dict(quiz.get("score_names") or {}),
+                "round": quiz.get("round", 1),
+                "message_ids": _quiz_build_message_history(quiz, getattr(sent, "id", None)),
             }
         else:
             print(f"[quiz] stop send error: {e}", flush=True)
 
 
 def _is_reply_to_quiz_msg(message):
-    """True if the message is a Discord reply to the bot's last quiz question."""
+    """True if the message replies to any tracked quiz-related bot message."""
     ref = getattr(message, "reference", None)
     if not ref:
         return False
@@ -6392,8 +6946,63 @@ def _is_reply_to_quiz_msg(message):
     quiz = ACTIVE_QUIZZES.get(channel_id)
     if not quiz:
         return False
+
+    quiz_message_ids = quiz.get("message_ids")
+    if isinstance(quiz_message_ids, list):
+        try:
+            ref_id = int(ref.message_id)
+        except Exception:
+            ref_id = ref.message_id
+        if ref_id in quiz_message_ids:
+            return True
+
     last_id = quiz.get("last_message_id")
     return last_id is not None and ref.message_id == last_id
+
+
+def _quiz_track_message_id(quiz_state, message_id):
+    """Track quiz-related bot message IDs so replies stay addressable."""
+    if not isinstance(quiz_state, dict) or not message_id:
+        return
+
+    try:
+        normalized_id = int(message_id)
+    except Exception:
+        return
+
+    message_ids = quiz_state.get("message_ids")
+    if not isinstance(message_ids, list):
+        message_ids = []
+
+    if normalized_id not in message_ids:
+        message_ids.append(normalized_id)
+    if len(message_ids) > 40:
+        message_ids = message_ids[-40:]
+
+    quiz_state["message_ids"] = message_ids
+    quiz_state["last_message_id"] = normalized_id
+
+
+def _quiz_normalize_message_ids(raw_message_ids):
+    """Normalize and dedupe message id history while preserving order."""
+    temp_state = {}
+    if isinstance(raw_message_ids, list):
+        for raw_id in raw_message_ids:
+            _quiz_track_message_id(temp_state, raw_id)
+    return list(temp_state.get("message_ids") or [])
+
+
+def _quiz_build_message_history(state, appended_message_id=None):
+    """Build message-id history from existing state plus an optional new message id."""
+    temp_state = {
+        "message_ids": _quiz_normalize_message_ids(
+            (state or {}).get("message_ids", []) if isinstance(state, dict) else []
+        )
+    }
+    if isinstance(state, dict):
+        _quiz_track_message_id(temp_state, state.get("last_message_id"))
+    _quiz_track_message_id(temp_state, appended_message_id)
+    return list(temp_state.get("message_ids") or [])
 
 
 def _is_reply_to_quiz_followup_msg(message):
@@ -6402,6 +7011,18 @@ def _is_reply_to_quiz_followup_msg(message):
     if not ref:
         return False
     pending = QUIZ_PENDING_ANOTHER.get(message.channel.id)
+    if not pending:
+        return False
+    pending_id = pending.get("message_id")
+    return pending_id is not None and ref.message_id == pending_id
+
+
+def _is_reply_to_quiz_mode_prompt(message):
+    """True if message replies to the most recent difficulty prompt."""
+    ref = getattr(message, "reference", None)
+    if not ref:
+        return False
+    pending = QUIZ_PENDING_MODE.get(message.channel.id)
     if not pending:
         return False
     pending_id = pending.get("message_id")
@@ -6423,6 +7044,21 @@ def _quiz_pending_another_active(channel_id):
     return True
 
 
+def _quiz_pending_mode_active(channel_id):
+    pending = QUIZ_PENDING_MODE.get(channel_id)
+    if not pending:
+        return False
+    created_at = pending.get("created_at")
+    if not created_at:
+        QUIZ_PENDING_MODE.pop(channel_id, None)
+        return False
+    age = (datetime.datetime.now(datetime.timezone.utc) - created_at).total_seconds()
+    if age > QUIZ_PENDING_MODE_TTL_SECONDS:
+        QUIZ_PENDING_MODE.pop(channel_id, None)
+        return False
+    return True
+
+
 def _quiz_answer_display(quiz):
     row = quiz["row"]
     char_key = quiz["char_key"]
@@ -6430,6 +7066,28 @@ def _quiz_answer_display(quiz):
     move_name = str(row.get("moveName", "?")).strip()
     num_cmd = str(row.get("numCmd", "?")).strip()
     return char_display, move_name, num_cmd
+
+
+def _quiz_owner_user_id(state):
+    if not isinstance(state, dict):
+        return None
+    raw_owner = state.get("owner_user_id")
+    try:
+        return int(raw_owner)
+    except Exception:
+        return None
+
+
+def _quiz_user_can_end(state, user_id):
+    # Quiz ending is communal: any participant can end the session.
+    return True
+
+
+def _quiz_owner_only_end_message(state):
+    owner_id = _quiz_owner_user_id(state)
+    if owner_id is None:
+        return "Only the user who started this quiz can end it."
+    return f"Only <@{owner_id}> can end this quiz."
 
 
 async def handle_quiz_post_answer_choice(message):
@@ -6443,22 +7101,52 @@ async def handle_quiz_post_answer_choice(message):
     if not text:
         return False
 
-    if QUIZ_GUESS_AGAIN_RE.search(text):
+    wants_guess_again = bool(QUIZ_GUESS_AGAIN_RE.search(text))
+    wants_reveal = bool(QUIZ_REVEAL_END_RE.search(text))
+
+    if not wants_guess_again and not wants_reveal:
+        inferred_intent = await classify_quiz_post_answer_choice_intent(message.channel, text)
+        if inferred_intent == "guess_again":
+            wants_guess_again = True
+        elif inferred_intent == "reveal":
+            wants_reveal = True
+
+    if wants_guess_again:
         quiz["awaiting_choice"] = False
         try:
-            await message.reply("Guess again.")
+            sent = await message.reply("Guess again.")
+            _quiz_track_message_id(quiz, getattr(sent, "id", None))
         except Exception as e:
             if is_deleted_message_reference_error(e):
-                await message.channel.send("Guess again.")
+                sent = await message.channel.send("Guess again.")
+                _quiz_track_message_id(quiz, getattr(sent, "id", None))
             else:
                 print(f"[quiz] guess-again reply error: {e}", flush=True)
         return True
 
-    if QUIZ_REVEAL_END_RE.search(text):
+    if wants_reveal:
+        if not _quiz_user_can_end(quiz, message.author.id):
+            deny_text = _quiz_owner_only_end_message(quiz)
+            try:
+                sent = await message.reply(deny_text)
+                _quiz_track_message_id(quiz, getattr(sent, "id", None))
+            except Exception as e:
+                if is_deleted_message_reference_error(e):
+                    sent = await message.channel.send(deny_text)
+                    _quiz_track_message_id(quiz, getattr(sent, "id", None))
+                else:
+                    print(f"[quiz] owner-only reveal reply error: {e}", flush=True)
+            return True
+
         ACTIVE_QUIZZES.pop(channel_id, None)
         char_display, move_name, num_cmd = _quiz_answer_display(quiz)
+        score_text = _format_quiz_scores(
+            dict(quiz.get("scores") or {}),
+            dict(quiz.get("score_names") or {}),
+        )
         reply_text = (
             f"The answer was **{char_display}'s {move_name} ({num_cmd})**.\n"
+            f"{score_text}\n"
             "Would you like another question?"
         )
         try:
@@ -6466,6 +7154,12 @@ async def handle_quiz_post_answer_choice(message):
             QUIZ_PENDING_ANOTHER[channel_id] = {
                 "created_at": datetime.datetime.now(datetime.timezone.utc),
                 "message_id": getattr(sent, "id", None),
+                "mode": quiz.get("mode", "hard"),
+                "owner_user_id": quiz.get("owner_user_id"),
+                "scores": dict(quiz.get("scores") or {}),
+                "score_names": dict(quiz.get("score_names") or {}),
+                "round": quiz.get("round", 1),
+                "message_ids": _quiz_build_message_history(quiz, getattr(sent, "id", None)),
             }
         except Exception as e:
             if is_deleted_message_reference_error(e):
@@ -6473,6 +7167,12 @@ async def handle_quiz_post_answer_choice(message):
                 QUIZ_PENDING_ANOTHER[channel_id] = {
                     "created_at": datetime.datetime.now(datetime.timezone.utc),
                     "message_id": getattr(sent, "id", None),
+                    "mode": quiz.get("mode", "hard"),
+                    "owner_user_id": quiz.get("owner_user_id"),
+                    "scores": dict(quiz.get("scores") or {}),
+                    "score_names": dict(quiz.get("score_names") or {}),
+                    "round": quiz.get("round", 1),
+                    "message_ids": _quiz_build_message_history(quiz, getattr(sent, "id", None)),
                 }
             else:
                 print(f"[quiz] reveal-end reply error: {e}", flush=True)
@@ -6502,30 +7202,47 @@ async def handle_quiz_answer(message):
 
     if not check_quiz_answer(quiz, text):
         quiz["awaiting_choice"] = True
+        wrong_reply = await build_quiz_wrong_guess_message(message.channel)
+        wrong_followup = "Try again or give up and find out the answer"
+        wrong_text = f"{wrong_reply}\n{wrong_followup}" if wrong_reply else wrong_followup
         try:
-            await message.reply(
-                "Not correct yet. Would you like the answer and end the quiz or guess again?"
-            )
+            sent = await message.reply(wrong_text)
+            _quiz_track_message_id(quiz, getattr(sent, "id", None))
         except Exception as e:
             if is_deleted_message_reference_error(e):
-                await message.channel.send(
-                    "Not correct yet. Would you like the answer and end the quiz or guess again?"
-                )
+                sent = await message.channel.send(wrong_text)
+                _quiz_track_message_id(quiz, getattr(sent, "id", None))
             else:
                 print(f"[quiz] wrong-answer reply error: {e}", flush=True)
         return True
 
+    scores = quiz.setdefault("scores", {})
+    score_names = quiz.setdefault("score_names", {})
+    winner_id = int(message.author.id)
+    winner_name = _quiz_user_display_name(message.author)
+    winner_points = int(scores.get(winner_id, 0)) + 1
+    scores[winner_id] = winner_points
+    score_names[winner_id] = winner_name
+
     ACTIVE_QUIZZES.pop(channel_id, None)
     char_display, move_name, num_cmd = _quiz_answer_display(quiz)
-    result_text = (
-        f"Correct. The answer was **{char_display}'s {move_name} ({num_cmd})**.\n"
-        "Would you like another question?"
-    )
+    correct_reply = await build_quiz_correct_guess_message(message.channel)
+    winner_line = _quiz_score_line(winner_name, winner_points)
+    result_lines = [correct_reply, winner_line]
+    result_lines.append(f"The answer was **{char_display}'s {move_name} ({num_cmd})**.")
+    result_lines.append("Would you like another question?")
+    result_text = "\n".join(result_lines)
     try:
         sent = await message.reply(result_text)
         QUIZ_PENDING_ANOTHER[channel_id] = {
             "created_at": datetime.datetime.now(datetime.timezone.utc),
             "message_id": getattr(sent, "id", None),
+            "mode": quiz.get("mode", "hard"),
+            "owner_user_id": quiz.get("owner_user_id"),
+            "scores": dict(scores),
+            "score_names": dict(score_names),
+            "round": quiz.get("round", 1),
+            "message_ids": _quiz_build_message_history(quiz, getattr(sent, "id", None)),
         }
     except Exception as e:
         if is_deleted_message_reference_error(e):
@@ -6533,6 +7250,12 @@ async def handle_quiz_answer(message):
             QUIZ_PENDING_ANOTHER[channel_id] = {
                 "created_at": datetime.datetime.now(datetime.timezone.utc),
                 "message_id": getattr(sent, "id", None),
+                "mode": quiz.get("mode", "hard"),
+                "owner_user_id": quiz.get("owner_user_id"),
+                "scores": dict(scores),
+                "score_names": dict(score_names),
+                "round": quiz.get("round", 1),
+                "message_ids": _quiz_build_message_history(quiz, getattr(sent, "id", None)),
             }
         else:
             print(f"[quiz] correct-reply error: {e}", flush=True)
@@ -6742,65 +7465,237 @@ async def on_message(message):
     channel_id = message.channel.id
     in_quiz = channel_id in ACTIVE_QUIZZES
     quiz_state = ACTIVE_QUIZZES.get(channel_id)
+    requested_quiz_mode = _quiz_extract_mode_from_text(content_lower)
     answer_is_addressed = client.user.mentioned_in(message) or _is_reply_to_quiz_msg(message)
+    mode_prompt_reply = _is_reply_to_quiz_mode_prompt(message)
     command_is_addressed = (
         client.user.mentioned_in(message)
         or bool(QUIZ_NAME_PREFIX_RE.search(content_lower))
         or _is_reply_to_quiz_followup_msg(message)
+        or mode_prompt_reply
     )
 
     # Follow-up after ending a quiz
-    if not in_quiz and _quiz_pending_another_active(channel_id) and command_is_addressed:
+    if (
+        not in_quiz
+        and _quiz_pending_another_active(channel_id)
+        and (command_is_addressed or requested_quiz_mode in QUIZ_VALID_MODES)
+    ):
+        pending = QUIZ_PENDING_ANOTHER.get(channel_id, {})
+        pending_scores = dict(pending.get("scores") or {})
+        pending_score_names = dict(pending.get("score_names") or {})
+        pending_owner_user_id = pending.get("owner_user_id")
+        pending_message_ids = list(pending.get("message_ids") or [])
+        try:
+            next_round = max(1, int(pending.get("round", 1))) + 1
+        except Exception:
+            next_round = 2
+
         if QUIZ_ANOTHER_YES_RE.search(content_lower) or QUIZ_INTENT_RE.search(content_lower):
+            followup_mode = str(requested_quiz_mode or pending.get("mode") or "").strip().lower()
             QUIZ_PENDING_ANOTHER.pop(channel_id, None)
-            await start_quiz(message)
+            if followup_mode not in QUIZ_VALID_MODES:
+                await prompt_quiz_mode_selection(
+                    message,
+                    session_mode=pending.get("mode"),
+                    session_scores=pending_scores,
+                    session_score_names=pending_score_names,
+                    session_round=next_round,
+                    session_owner_user_id=pending_owner_user_id,
+                    session_message_ids=pending_message_ids,
+                )
+                return
+            await start_quiz(
+                message,
+                mode=followup_mode,
+                session_scores=pending_scores,
+                session_score_names=pending_score_names,
+                session_round=next_round,
+                session_owner_user_id=pending_owner_user_id,
+                session_message_ids=pending_message_ids,
+            )
             return
-        if QUIZ_ANOTHER_NO_RE.search(content_lower):
+
+        if requested_quiz_mode in QUIZ_VALID_MODES:
             QUIZ_PENDING_ANOTHER.pop(channel_id, None)
+            await start_quiz(
+                message,
+                mode=requested_quiz_mode,
+                session_scores=pending_scores,
+                session_score_names=pending_score_names,
+                session_round=next_round,
+                session_owner_user_id=pending_owner_user_id,
+                session_message_ids=pending_message_ids,
+            )
+            return
+
+        if QUIZ_ANOTHER_NO_RE.search(content_lower):
+            if not _quiz_user_can_end(pending, message.author.id):
+                deny_text = _quiz_owner_only_end_message(pending)
+                try:
+                    await message.reply(deny_text)
+                except Exception as e:
+                    if is_deleted_message_reference_error(e):
+                        await message.channel.send(deny_text)
+                    else:
+                        print(f"[quiz] owner-only pending-end reply error: {e}", flush=True)
+                return
+
+            QUIZ_PENDING_ANOTHER.pop(channel_id, None)
+            QUIZ_PENDING_MODE.pop(channel_id, None)
+            crown_line = _quiz_build_crown_line(pending_scores, pending_score_names)
+            score_text = _format_quiz_scores(pending_scores, pending_score_names)
             decline_reply = await build_quiz_decline_message(message.channel)
+            final_reply = f"{crown_line}\n{score_text}\n{decline_reply}"
             try:
-                await message.reply(decline_reply)
+                await message.reply(final_reply)
             except Exception as e:
                 if is_deleted_message_reference_error(e):
-                    await message.channel.send(decline_reply)
+                    await message.channel.send(final_reply)
                 else:
                     print(f"[quiz] another-question reply error: {e}", flush=True)
             return
 
-    # Active quiz interactions (mention or reply required)
+    # Pending difficulty selection
+    if not in_quiz and _quiz_pending_mode_active(channel_id):
+        pending_mode = QUIZ_PENDING_MODE.get(channel_id, {})
+        pending_mode_scores = dict(pending_mode.get("scores") or {})
+        pending_mode_score_names = dict(pending_mode.get("score_names") or {})
+        pending_mode_round = pending_mode.get("round", 1)
+        pending_mode_owner_user_id = pending_mode.get("owner_user_id")
+        pending_mode_message_ids = list(pending_mode.get("message_ids") or [])
+
+        if requested_quiz_mode in QUIZ_VALID_MODES:
+            QUIZ_PENDING_MODE.pop(channel_id, None)
+            await start_quiz(
+                message,
+                mode=requested_quiz_mode,
+                session_scores=pending_mode_scores,
+                session_score_names=pending_mode_score_names,
+                session_round=pending_mode_round,
+                session_owner_user_id=pending_mode_owner_user_id,
+                session_message_ids=pending_mode_message_ids,
+            )
+            return
+
+        if command_is_addressed:
+            if re.search(r'\b(stop|end|quit|cancel)\b', content_lower):
+                if not _quiz_user_can_end(pending_mode, message.author.id):
+                    deny_text = _quiz_owner_only_end_message(pending_mode)
+                    try:
+                        await message.reply(deny_text)
+                    except Exception as e:
+                        if is_deleted_message_reference_error(e):
+                            await message.channel.send(deny_text)
+                        else:
+                            print(f"[quiz] owner-only mode-cancel reply error: {e}", flush=True)
+                    return
+
+                QUIZ_PENDING_MODE.pop(channel_id, None)
+                try:
+                    await message.reply("Quiz setup cancelled.")
+                except Exception as e:
+                    if is_deleted_message_reference_error(e):
+                        await message.channel.send("Quiz setup cancelled.")
+                    else:
+                        print(f"[quiz] mode-cancel reply error: {e}", flush=True)
+                return
+
+            if mode_prompt_reply or QUIZ_INTENT_RE.search(content_lower):
+                await prompt_quiz_mode_selection(
+                    message,
+                    session_mode=pending_mode.get("mode"),
+                    session_scores=pending_mode_scores,
+                    session_score_names=pending_mode_score_names,
+                    session_round=pending_mode_round,
+                    session_owner_user_id=pending_mode_owner_user_id,
+                    session_message_ids=pending_mode_message_ids,
+                )
+                return
+
+    # Active quiz interactions (answer attempts require mention or reply)
     if in_quiz and answer_is_addressed:
         if re.search(r'\b(stop|end|quit|cancel)\b', content_lower):
+            if not _quiz_user_can_end(quiz_state, message.author.id):
+                deny_text = _quiz_owner_only_end_message(quiz_state)
+                try:
+                    sent = await message.reply(deny_text)
+                    _quiz_track_message_id(quiz_state, getattr(sent, "id", None))
+                except Exception as e:
+                    if is_deleted_message_reference_error(e):
+                        sent = await message.channel.send(deny_text)
+                        _quiz_track_message_id(quiz_state, getattr(sent, "id", None))
+                    else:
+                        print(f"[quiz] owner-only stop reply error: {e}", flush=True)
+                return
+
             await stop_quiz(message)
             return
 
+        if quiz_state and not quiz_state.get("awaiting_choice") and QUIZ_FORFEIT_RE.search(content_lower):
+            if not _quiz_user_can_end(quiz_state, message.author.id):
+                deny_text = _quiz_owner_only_end_message(quiz_state)
+                try:
+                    sent = await message.reply(deny_text)
+                    _quiz_track_message_id(quiz_state, getattr(sent, "id", None))
+                except Exception as e:
+                    if is_deleted_message_reference_error(e):
+                        sent = await message.channel.send(deny_text)
+                        _quiz_track_message_id(quiz_state, getattr(sent, "id", None))
+                    else:
+                        print(f"[quiz] owner-only forfeit reply error: {e}", flush=True)
+                return
+
+            await stop_quiz(message)
+            return
+
+        if QUIZ_CHEAT_LOOKUP_RE.search(content_lower):
+            cheat_reply = await build_quiz_cheating_warning_message(message.channel)
+            try:
+                sent = await message.reply(cheat_reply)
+                _quiz_track_message_id(quiz_state, getattr(sent, "id", None))
+            except Exception as e:
+                if is_deleted_message_reference_error(e):
+                    sent = await message.channel.send(cheat_reply)
+                    _quiz_track_message_id(quiz_state, getattr(sent, "id", None))
+                else:
+                    print(f"[quiz] cheating-warning reply error: {e}", flush=True)
+            return
+
         if quiz_state and quiz_state.get("awaiting_choice"):
-            if (
-                QUIZ_ESCAPE_REQUEST_RE.search(content_lower)
-                and not QUIZ_GUESS_AGAIN_RE.search(content_lower)
-                and not QUIZ_REVEAL_END_RE.search(content_lower)
-            ):
-                ACTIVE_QUIZZES.pop(channel_id, None)
-                QUIZ_PENDING_ANOTHER.pop(channel_id, None)
             if await handle_quiz_post_answer_choice(message):
                 return
             if await handle_quiz_answer(message):
                 return
-            ACTIVE_QUIZZES.pop(channel_id, None)
-            QUIZ_PENDING_ANOTHER.pop(channel_id, None)
+            if not QUIZ_INTENT_RE.search(content_lower):
+                return
         else:
-            if QUIZ_ESCAPE_REQUEST_RE.search(content_lower) and not QUIZ_INTENT_RE.search(content_lower):
-                ACTIVE_QUIZZES.pop(channel_id, None)
-                QUIZ_PENDING_ANOTHER.pop(channel_id, None)
-            elif not QUIZ_INTENT_RE.search(content_lower):
+            if not QUIZ_INTENT_RE.search(content_lower):
                 if await handle_quiz_answer(message):
                     return
+                return
 
     # Start or stop a single-question quiz
     if command_is_addressed and QUIZ_INTENT_RE.search(content_lower):
         if re.search(r'\b(stop|end|quit|cancel)\b', content_lower):
+            if in_quiz and not _quiz_user_can_end(quiz_state, message.author.id):
+                deny_text = _quiz_owner_only_end_message(quiz_state)
+                try:
+                    sent = await message.reply(deny_text)
+                    _quiz_track_message_id(quiz_state, getattr(sent, "id", None))
+                except Exception as e:
+                    if is_deleted_message_reference_error(e):
+                        sent = await message.channel.send(deny_text)
+                        _quiz_track_message_id(quiz_state, getattr(sent, "id", None))
+                    else:
+                        print(f"[quiz] owner-only stop-command reply error: {e}", flush=True)
+                return
             await stop_quiz(message)
         else:
-            await start_quiz(message)
+            if requested_quiz_mode not in QUIZ_VALID_MODES:
+                await prompt_quiz_mode_selection(message)
+            else:
+                await start_quiz(message, mode=requested_quiz_mode)
         return
 
     if "tarkus" in content_lower:
@@ -7041,6 +7936,24 @@ async def on_message(message):
                 or implied_has_special_prompt
             )
         )
+
+    if (
+        not vague_move_query_without_output_intent
+        and client.user.mentioned_in(message)
+        and not message.reference
+        and target_combo_query
+        and explicit_move_attempt
+        and fd_context_mode == "frame"
+        and fd_context_rows
+        and not gif_query
+        and not explicit_frame_request
+        and not property_only_query
+        and not startup_alias_query
+        and not hitconfirm_alias_query
+        and not super_gain_alias_query
+        and not range_alias_query
+    ):
+        vague_move_query_without_output_intent = True
 
     if should_handle_direct_frame:
         if vague_move_query_without_output_intent:
